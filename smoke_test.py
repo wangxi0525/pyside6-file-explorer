@@ -301,6 +301,93 @@ def main():
     w.navigate(tmp)
     app.processEvents()
 
+    # ---- 启动器脚本静态检查 ----
+    print("== 启动脚本 ==")
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # VBScript 保留字：作为变量名会导致 "缺少标识符" 语法错误
+    vbs_reserved = set("""
+        sub function class property let get set dim redim const if then else
+        elseif end select case for each next do loop while wend with exit on
+        error resume goto call new nothing null true false step to is or and
+        not xor mod eqv imp like rem erase execute executeglobal option
+        explicit byval byref optional paramarray me public private static type
+        lib load name base compare binary text stop default error empty input
+        """.split())
+
+    vbs_path = os.path.join(here, "启动.vbs")
+    check("启动.vbs 存在", os.path.isfile(vbs_path))
+    if os.path.isfile(vbs_path):
+        raw = open(vbs_path, "rb").read()
+        try:
+            vtxt = raw.decode("ascii")
+            check("vbs 为纯 ASCII", True)
+        except UnicodeDecodeError:
+            vtxt = raw.decode("latin-1")
+            check("vbs 为纯 ASCII", False, "含非 ASCII 字节")
+
+        crlf = raw.count(b"\r\n")
+        bare = raw.count(b"\n") - crlf
+        check("vbs 换行为 CRLF", bare == 0, f"bareLF={bare}")
+        check("vbs 无 BOM", raw[:3] != b"\xef\xbb\xbf")
+
+        lines = vtxt.split("\r\n")
+        declared, conflicts = set(), []
+        for d in re.findall(r"^Dim (.+)$", vtxt, re.M | re.I):
+            for v in d.split(","):
+                v = v.strip()
+                if not v:
+                    continue
+                declared.add(v.lower())
+                if v.lower() in vbs_reserved:
+                    conflicts.append(v)
+        check("vbs 无保留字变量名", not conflicts, str(conflicts))
+
+        builtin = {"wscript", "err", "nothing", "fso", "shell"}
+        targets = set(re.findall(
+            r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)", vtxt))
+        undeclared = sorted(t for t in targets
+                            if t.lower() not in declared
+                            and t.lower() not in builtin)
+        check("vbs 变量均已声明", not undeclared, str(undeclared))
+
+        # 块结构配对：For 用 Next 闭合，If 用 End If 闭合
+        opens_for = sum(
+            1 for l in lines
+            if not l.strip().startswith("'")
+            and re.match(r"^\s*For\s+Each\b", l, re.I))
+        opens_for += sum(
+            1 for l in lines
+            if not l.strip().startswith("'")
+            and re.match(r"^\s*For\s+\w+\s*=", l, re.I))
+        opens_if = sum(
+            1 for l in lines
+            if not l.strip().startswith("'")
+            and re.match(r"^\s*If\b.*\bThen$", l.strip(), re.I))
+        closes_for = sum(
+            1 for l in lines if re.match(r"^\s*Next\b", l, re.I))
+        closes_if = sum(
+            1 for l in lines
+            if re.match(r"^\s*End\s+If\b", l, re.I))
+        check("vbs For/Next 配对", opens_for == closes_for,
+              f"{opens_for}/{closes_for}")
+        check("vbs If/End If 配对", opens_if == closes_if,
+              f"{opens_if}/{closes_if}")
+
+    # bat 同样不能有裸 LF（双击会解析失败）
+    bat_path = os.path.join(here, "start.bat")
+    check("start.bat 存在", os.path.isfile(bat_path))
+    if os.path.isfile(bat_path):
+        braw = open(bat_path, "rb").read()
+        bbare = braw.count(b"\n") - braw.count(b"\r\n")
+        check("bat 换行为 CRLF", bbare == 0, f"bareLF={bbare}")
+        try:
+            braw.decode("ascii")
+            check("bat 为纯 ASCII", True)
+        except UnicodeDecodeError:
+            check("bat 为纯 ASCII", False, "含非 ASCII（GBK 下会崩）")
+
     w.close()
     app.processEvents()
     print()
