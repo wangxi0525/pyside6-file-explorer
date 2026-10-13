@@ -68,8 +68,8 @@ if /i "%~1"=="--check" (
   exit /b 0
 )
 
-REM --run is passed by the VBS launcher: no console output, and the
-REM command window closes on its own once the GUI comes up.
+REM --run keeps the console silent and hands off to pythonw.exe, so no
+REM command window is left behind once the GUI appears.
 if /i "%~1"=="--run" goto :launch_silent
 
 echo [RUN] Starting Qt File Explorer...
