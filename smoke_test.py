@@ -411,6 +411,19 @@ def main():
                        for s in (16, 32, 48, 256))
         check("图标多尺寸可用", ok_sizes)
 
+    # 版本号与关于对话框
+    import main_window as mw
+    check("版本号已定义", bool(getattr(mw, "APP_VERSION", "")), mw.APP_VERSION)
+    check("版本号格式正确",
+          mw.APP_VERSION.count(".") >= 1
+          and all(p.isdigit() for p in mw.APP_VERSION.split(".")),
+          mw.APP_VERSION)
+    check("标题含版本号", mw.APP_VERSION in w.windowTitle(), w.windowTitle())
+    about = mw.AboutDialog(w)
+    check("关于对话框可创建", "关于" in about.windowTitle(), about.windowTitle())
+    check("关于对话框含仓库地址", "github.com" in about.REPO, about.REPO)
+    check("图标可被读取", mw.resource_icon(96) is not None)
+
     # 已构建的 exe（如果存在）
     exe_dir = os.path.join(here, "dist", "QtExplorer")
     exe = os.path.join(exe_dir, "QtExplorer.exe")

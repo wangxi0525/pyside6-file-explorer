@@ -2,6 +2,8 @@
 
 一个用 Qt（PySide6）实现的桌面文件管理器，功能对齐 Windows 资源管理器。
 
+**当前版本：1.0**
+
 ![界面](shot_icons.png)
 
 ![详细信息视图](shot_detail.png)
@@ -108,6 +110,7 @@ python run.py
 | `Ctrl+G`              | 转到    | `Ctrl+A`       | 全选           |
 | `Space`               | 切换视图  | `Alt+Enter`    | 属性           |
 | `F9`                  | 侧栏开关  | `Ctrl+R`     | 重新枚举磁盘       |
+| `F1`                  | 关于      |                |              |
 | `Ctrl+Shift+A`        | 隐藏文件  |                |              |
 
 ## 代码结构

@@ -4,6 +4,7 @@ main_window.py —— 主窗口与界面逻辑
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 
 from PySide6.QtCore import (Qt, QDir, QSize, QTimer, QStandardPaths,
@@ -25,6 +26,7 @@ from core import (DirScan, DriveInfo, Worker, drive_icon_pixmap,
                   unique_name, EXT_COLOR_MAP)
 
 APP_NAME = "Qt 资源管理器"
+APP_VERSION = "1.0"
 
 # ---------------------------------------------------------------- 自定义对话框
 
@@ -184,6 +186,95 @@ class PropertiesDialog(QDialog):
         bb.rejected.connect(self.reject)
         bb.accepted.connect(self.accept)
         lay.addWidget(bb)
+
+
+class AboutDialog(QDialog):
+    """关于对话框：显示版本、技术栈与仓库地址。"""
+
+    REPO = "https://github.com/wangxi0525/pyside6-file-explorer"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"关于 {APP_NAME}")
+        self.setFixedWidth(420)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 16)
+        lay.setSpacing(14)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        ico = resource_icon(96)
+        if ico:
+            icon.setPixmap(ico)
+        head.addWidget(icon)
+        col = QVBoxLayout()
+        name = QLabel(APP_NAME)
+        name.setStyleSheet("font-size:18px;font-weight:600;color:#37474F;")
+        ver = QLabel(f"版本 {APP_VERSION}")
+        ver.setStyleSheet("color:#78909C;")
+        col.addWidget(name)
+        col.addWidget(ver)
+        head.addLayout(col, 1)
+        lay.addLayout(head)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#ECEFF1;")
+        lay.addWidget(sep)
+
+        rows = QVBoxLayout()
+        rows.setSpacing(7)
+
+        def add_row(k: str, v: str):
+            h = QHBoxLayout()
+            a = QLabel(k)
+            a.setFixedWidth(72)
+            a.setStyleSheet("color:#607D8B;")
+            b = QLabel(v)
+            b.setWordWrap(True)
+            b.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            h.addWidget(a)
+            h.addWidget(b, 1)
+            rows.addLayout(h)
+
+        try:
+            from PySide6 import __version__ as pyside_ver
+        except Exception:
+            pyside_ver = "unknown"
+        add_row("技术栈", "Python + PySide6 (Qt 6)")
+        add_row("PySide6", pyside_ver)
+        add_row("授权", "MIT License")
+        lay.addLayout(rows)
+
+        repo = QLabel(
+            f'<a href="{self.REPO}" style="color:#1565C0;">{self.REPO}</a>')
+        repo.setOpenExternalLinks(True)
+        repo.setWordWrap(True)
+        repo.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(repo)
+
+        lay.addStretch()
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        lay.addWidget(bb)
+
+
+def _resource_dir() -> str:
+    """定位随包资源目录，兼容源码运行与 PyInstaller 打包。"""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_icon(size: int = 96):
+    """读取应用图标，返回 QPixmap；找不到返回 None。"""
+    path = os.path.join(_resource_dir(), "app_icon.ico")
+    if not os.path.isfile(path):
+        return None
+    pm = QIcon(path).pixmap(size, size)
+    return None if pm.isNull() else pm
 
 
 def _describe_count(path: str, is_dir: bool) -> str:
@@ -780,6 +871,7 @@ class Explorer(QMainWindow):
         act("Alt+Enter", self.action_properties)
         act("F9", self.toggle_sidebar)
         act("Ctrl+R", self.refresh_drives)
+        act("F1", self.action_about)
 
     # ---------------- 导航
 
@@ -805,7 +897,7 @@ class Explorer(QMainWindow):
         if push_history:
             self.history.push(path)
         self.path_edit.setText(path)
-        self.setWindowTitle(f"{os.path.basename(path) or path} — {APP_NAME}")
+        self.setWindowTitle(f"{os.path.basename(path) or path} — {APP_NAME} {APP_VERSION}")
         self.refresh()
 
     def refresh(self):
@@ -1204,6 +1296,9 @@ class Explorer(QMainWindow):
         elif self.clipboard:
             self.copy_paths(self.clipboard, self.cwd)
 
+    def action_about(self):
+        AboutDialog(self).exec()
+
     def action_show_hidden(self):
         self.show_hidden = not self.show_hidden
         self.statusBar().showMessage(
@@ -1243,6 +1338,8 @@ class Explorer(QMainWindow):
         m.addAction("显示隐藏文件" + ("  ✓" if self.show_hidden else ""),
                     self.action_show_hidden)
         m.addAction("属性", self.action_properties)
+        m.addSeparator()
+        m.addAction(f"关于 {APP_NAME}", self.action_about)
         m.addSeparator()
         m.addAction("退出", self.close)
         m.exec(self.cursor().pos())
