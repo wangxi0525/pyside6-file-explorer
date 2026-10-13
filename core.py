@@ -597,3 +597,75 @@ def _count_dir(path: str, budget: list, info: PreviewInfo,
                     continue
     except (OSError, PermissionError):
         pass
+
+
+# ---------------------------------------------------------------- 收藏夹
+
+def _fav_path() -> str:
+    """收藏夹数据文件位置：%APPDATA%/QtExplorer/favorites.json。"""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "QtExplorer")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "favorites.json")
+
+
+def load_favorites() -> list[str]:
+    """读取收藏夹列表，按保存顺序。路径不存在会被自动剔除。"""
+    import json
+    try:
+        with open(_fav_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for p in data:
+        if isinstance(p, str) and os.path.exists(p) and p not in out:
+            out.append(p)
+    return out
+
+
+def save_favorites(paths: list[str]) -> None:
+    """保存收藏夹列表。"""
+    import json
+    try:
+        with open(_fav_path(), "w", encoding="utf-8") as f:
+            json.dump(list(paths), f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def add_favorite(path: str) -> bool:
+    """加入收藏，返回是否新加。"""
+    path = os.path.abspath(path)
+    favs = load_favorites()
+    if path in favs:
+        return False
+    favs.append(path)
+    save_favorites(favs)
+    return True
+
+
+def remove_favorite(path: str) -> bool:
+    """移出收藏，返回是否确实移除了。"""
+    path = os.path.abspath(path)
+    favs = load_favorites()
+    if path not in favs:
+        return False
+    favs.remove(path)
+    save_favorites(favs)
+    return True
+
+
+def toggle_favorite(path: str) -> bool:
+    """切换收藏状态，返回切换后是否为已收藏。"""
+    path = os.path.abspath(path)
+    if path in load_favorites():
+        remove_favorite(path)
+        return False
+    add_favorite(path)
+    return True

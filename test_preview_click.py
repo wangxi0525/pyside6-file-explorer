@@ -90,10 +90,11 @@ def main():
             break
     check("目录列表含子目录", target is not None)
     w.icon_list.setCurrentRow(target)
-    for _ in range(60):
+    # 现在扫描期间会先显示「正在读取」占位，要等实际条目渲染出来
+    for _ in range(80):
         app.processEvents()
         w.preview_worker.wait(40)
-        if w.preview.scroll.isVisible():
+        if [r for r in w.preview.body.findChildren(EntryRow) if r.path]:
             break
 
     check("预览已显示", w.preview.scroll.isVisible())

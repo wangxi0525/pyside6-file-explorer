@@ -26,7 +26,9 @@ from PySide6.QtWidgets import (
 from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   human_size, icon_for, is_hidden, kind_of, list_drives,
                   open_in_explorer, open_terminal, scan_dir, scan_preview,
-                  send2trash, unique_name, EXT_COLOR_MAP)
+                  send2trash, unique_name, EXT_COLOR_MAP,
+                  load_favorites, save_favorites, add_favorite,
+                  remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
 APP_VERSION = "1.01"
@@ -433,6 +435,8 @@ class EntryRow(QWidget):
         self.path = path
         self._hover = False
         self._selected = False
+        self._loading = False
+        self._pending_tip = tooltip
 
         h = QHBoxLayout(self)
         h.setContentsMargins(4, 2, 4, 2)
@@ -461,11 +465,11 @@ class EntryRow(QWidget):
         self.tail.setVisible(bool(tail))
         h.addWidget(self.tail, 0)
 
-        if tooltip:
-            self.setToolTip(tooltip)
         if path:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+        self.set_loading(True)      # 先进入加载态，扫描完成才给 tooltip
 
         # 记下基础字号，重绘样式时要用
         self._size = size
@@ -514,6 +518,28 @@ class EntryRow(QWidget):
     def set_selected(self, on: bool):
         self._selected = on
         self._restyle()
+
+    def set_loading(self, loading: bool):
+        """
+        加载态。
+
+        扫描进行中先不给 tooltip：后台扫描一有结果就重建整组 widget，
+        鼠标恰好悬在上面时 tooltip 会反复弹出/消失，看起来就是不断
+        闪现的小黑框。渲染完成后再 set_loading(False) 补上。
+        """
+        self._loading = loading
+        if loading:
+            self._tip = ""
+            self.setToolTip("")
+        else:
+            tip = getattr(self, "_pending_tip", "")
+            self.setToolTip(tip)
+
+    def set_tooltip(self, tip: str):
+        """记录完整 tooltip；若仍在加载态则等加载完再生效。"""
+        self._pending_tip = tip
+        if not getattr(self, "_loading", False):
+            self.setToolTip(tip)
 
     def set_active(self, on: bool):
         """兼容旧的选中联动接口。"""
@@ -643,6 +669,15 @@ class PreviewPane(QFrame):
         self.body_layout.addWidget(row)
         return row
 
+    def _finish_loading(self):
+        """
+        整组条目渲染完毕，统一解除加载态并补上 tooltip。
+
+        这样在扫描->渲染这段窗口期内不会有 tooltip 弹出。
+        """
+        for r in self.body.findChildren(EntryRow):
+            r.set_loading(False)
+
     def _on_entry_selected(self, path: str):
         """单击只选中：同组内取消其它行，保证同时只有一行高亮。"""
         for r in self.body.findChildren(EntryRow):
@@ -723,6 +758,18 @@ class PreviewPane(QFrame):
             self._row("空文件夹", color="#B0BEC5")
 
         self.body_layout.addStretch()
+        # 渲染完成，整组条目解除加载态，这时才允许 tooltip 弹出
+        self._finish_loading()
+
+    def show_loading(self, path: str = ""):
+        """扫描进行中的占位，避免面板空白让人以为没反应。"""
+        self._clear()
+        self.path = path
+        self.hint.setVisible(False)
+        self.scroll.setVisible(True)
+        self.title.setText("预览 · 读取中")
+        self.btn_goto.setEnabled(False)
+        self._row("正在读取…", color="#90A4AE", size=11)
 
     def show_file(self, path: str):
         """渲染文件信息预览。"""
@@ -937,6 +984,12 @@ class DriveItemWidget(QWidget):
             mid.addLayout(top)
 
         lay.addLayout(mid, 1)
+
+        # QListWidgetItem 的默认高度按图标算（约 22px），装不下图标 +
+        # 两行内容 + 容量条，会把文字裁掉。显式给出足够的高度。
+        self.setMinimumHeight(46)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Fixed)
 
         tip = d.root
         if d.fstype:
@@ -1268,6 +1321,8 @@ class Explorer(QMainWindow):
             pane.title.setText(
                 f"预览 · {os.path.basename(path.rstrip(chr(92)) or path)}"[:30])
             self.preview_scanner.set_show_hidden(self.show_hidden)
+            # 扫描期间显示占位提示，并等结果回来再解除条目加载态
+            pane.show_loading(path)
             self.preview_scanner.request(path)
         else:
             ext = os.path.splitext(path)[1].lower()
@@ -1342,6 +1397,9 @@ class Explorer(QMainWindow):
         self.side_list.setSpacing(1)
         self.side_list.setUniformItemSizes(False)
         self.side_list.setMouseTracking(True)
+        # 记录哪些分组处于收起状态；「位置」默认收起，让侧栏更紧凑
+        self._side_collapsed = {"home"}
+        self._side_groups = []
         self.side_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.side_list.customContextMenuRequested.connect(
             self._side_context_menu)
@@ -1369,6 +1427,7 @@ class Explorer(QMainWindow):
         self.side_list.clear()
         self._drive_items = []
         self._drive_widgets = []
+        self._side_groups = []
 
         try:
             drives = list_drives()
@@ -1383,35 +1442,67 @@ class Explorer(QMainWindow):
             # 容量用图形条表示，不再额外占一行列表项
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, d.root)
+            # 列表项高度要放得下 widget（含容量条的两行）
+            item.setSizeHint(QSize(0, 46))
             widget = DriveItemWidget(d)
             self.side_list.addItem(item)
             self.side_list.setItemWidget(item, widget)
             self._drive_widgets.append((item, widget))
             self._drive_items.append(d)
 
+        def emit(group):
+            """按该组的收起状态决定是否真正加入列表。"""
+            return group not in self._side_collapsed
+
+        # 收藏夹
+        favs = load_favorites()
+        if favs:
+            self._side_header("收藏夹", group="fav")
+            for p in favs:
+                if emit("fav"):
+                    self._add_fav_item(p)
+
         if disks:
             # 磁盘在上、快捷位置在下：盘符是最高频的跳转入口，
             # 放最上面一伸手就能点到
-            self._side_header("此电脑")
+            self._side_header("此电脑", group="disk")
             for d in disks:
-                add(d)
+                if emit("disk"):
+                    add(d)
         if homes:
-            self._side_header("位置")
+            self._side_header("位置", group="home")
             for d in homes:
-                add(d)
+                if emit("home"):
+                    add(d)
 
         self.side_list.blockSignals(False)
         self._sync_side_selection(current)
 
-    def _side_header(self, text):
+    def _side_header(self, text, group=None):
+        """
+        分组标题。带 group 时可点击展开/收起该组内容。
+
+        收起状态存在 self._side_collapsed 里，重新枚举磁盘后仍保持。
+        """
+        collapsed = group in self._side_collapsed
         it = QListWidgetItem(text)
         f = it.font()
         f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
         f.setBold(True)
         it.setFont(f)
-        it.setForeground(QColor("#90A4AE"))
-        it.setFlags(Qt.ItemFlag.NoItemFlags)      # 不可选中
+        it.setForeground(QColor("#78909C"))
+        it.setData(Qt.ItemDataRole.UserRole, None)      # 不可导航
+        it.setData(Qt.ItemDataRole.UserRole + 1, group)  # 存组名
+        it.setData(Qt.ItemDataRole.UserRole + 2, collapsed)
+        # 箭头提示可展开/收起
+        it.setIcon(QIcon(_arrow_pixmap(
+            "up" if collapsed else "down", 12, "#90A4AE")))
+        it.setFlags(Qt.ItemFlag.ItemIsEnabled)         # 可点击（但不可选中）
+        it.setSizeHint(QSize(0, 24))
+        if group:
+            self._side_groups.append((group, it))
         self.side_list.addItem(it)
+        return it
         return it
 
     def _sync_side_selection(self, path: str):
@@ -1434,7 +1525,32 @@ class Explorer(QMainWindow):
         for item, widget in getattr(self, "_drive_widgets", []):
             widget.set_active(item is self.side_list.currentItem())
 
+    def _add_fav_item(self, path):
+        """侧栏里的一条收藏项。"""
+        it = QListWidgetItem()
+        it.setData(Qt.ItemDataRole.UserRole, path)
+        it.setToolTip(path)
+        it.setIcon(icon_for(path, os.path.isdir(path), 18))
+        it.setSizeHint(QSize(0, 26))
+        self.side_list.addItem(it)
+        return it
+
+    def _toggle_group(self, group):
+        """展开/收起侧栏分组，然后重建侧栏。"""
+        if not group:
+            return
+        if group in self._side_collapsed:
+            self._side_collapsed.discard(group)
+        else:
+            self._side_collapsed.add(group)
+        self.refresh_drives()
+
     def _side_clicked(self, item):
+        # 分组标题：点击展开/收起
+        group = item.data(Qt.ItemDataRole.UserRole + 1)
+        if group:
+            self._toggle_group(group)
+            return
         root = item.data(Qt.ItemDataRole.UserRole)
         if root and os.path.isdir(root):
             self.navigate(root)
@@ -1443,12 +1559,28 @@ class Explorer(QMainWindow):
         item = self.side_list.itemAt(pos)
         if not item:
             return
+        # 分组标题：给展开/收起菜单
+        group = item.data(Qt.ItemDataRole.UserRole + 1)
+        if group:
+            m = QMenu(self)
+            collapsed = group in self._side_collapsed
+            m.addAction("展开" if collapsed else "收起",
+                        lambda: self._toggle_group(group))
+            m.exec(self.cursor().pos())
+            return
         root = item.data(Qt.ItemDataRole.UserRole)
         if not root or not os.path.isdir(root):
             return
         m = QMenu(self)
         m.addAction("打开", lambda: self.navigate(root))
         m.addAction("在新窗口打开", lambda: self._open_in_new_window(root))
+        # 收藏夹里已有的项给「取消收藏」
+        if root in load_favorites():
+            m.addAction("从收藏夹移除",
+                        lambda: self._remove_favorite(root))
+        else:
+            m.addAction("加入收藏夹",
+                        lambda: self._add_favorite(root))
         m.addAction("复制路径", lambda: self._copy_text(root))
         m.addSeparator()
         m.addAction("在资源管理器中打开", lambda: open_in_explorer(root))
@@ -1456,6 +1588,18 @@ class Explorer(QMainWindow):
         m.addSeparator()
         m.addAction("属性", lambda: PropertiesDialog(root, self).exec())
         m.exec(self.cursor().pos())
+
+    def _add_favorite(self, path):
+        if add_favorite(path):
+            self.refresh_drives()
+            self.statusBar().showMessage(
+                f"已收藏：{os.path.basename(path) or path}", 2000)
+
+    def _remove_favorite(self, path):
+        if remove_favorite(path):
+            self.refresh_drives()
+            self.statusBar().showMessage(
+                f"已取消收藏：{os.path.basename(path) or path}", 2000)
 
     def toggle_sidebar(self):
         """
@@ -2080,6 +2224,14 @@ class Explorer(QMainWindow):
             m.addAction("删除", self.action_delete)
             m.addSeparator()
             m.addAction("复制路径", lambda: self._copy_text(path))
+            # 收藏夹（只对文件夹有意义）
+            if os.path.isdir(path):
+                if path in load_favorites():
+                    m.addAction("从收藏夹移除",
+                                lambda: self._remove_favorite(path))
+                else:
+                    m.addAction("加入收藏夹",
+                                lambda: self._add_favorite(path))
             m.addAction("在资源管理器中显示", lambda: self._reveal(path))
             m.addSeparator()
             m.addAction("属性", lambda: PropertiesDialog(path, self).exec())
