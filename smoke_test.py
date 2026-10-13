@@ -302,8 +302,7 @@ def main():
     app.processEvents()
 
     # ---- 启动器脚本静态检查 ----
-    print("== 启动脚本 ==")
-    import re
+    print("== 启动脚本与打包配置 ==")
     here = os.path.dirname(os.path.abspath(__file__))
 
     # VBScript 保留字：作为变量名会导致 "缺少标识符" 语法错误
@@ -317,8 +316,7 @@ def main():
         """.split())
 
     vbs_path = os.path.join(here, "启动.vbs")
-    check("启动.vbs 存在", os.path.isfile(vbs_path))
-    if os.path.isfile(vbs_path):
+    if os.path.exists(vbs_path):
         raw = open(vbs_path, "rb").read()
         try:
             vtxt = raw.decode("ascii")
@@ -374,19 +372,60 @@ def main():
               f"{opens_for}/{closes_for}")
         check("vbs If/End If 配对", opens_if == closes_if,
               f"{opens_if}/{closes_if}")
+    else:
+        print("  [SKIP] 启动.vbs 已移除（改用 exe 启动）")
 
     # bat 同样不能有裸 LF（双击会解析失败）
-    bat_path = os.path.join(here, "start.bat")
-    check("start.bat 存在", os.path.isfile(bat_path))
-    if os.path.isfile(bat_path):
-        braw = open(bat_path, "rb").read()
-        bbare = braw.count(b"\n") - braw.count(b"\r\n")
-        check("bat 换行为 CRLF", bbare == 0, f"bareLF={bbare}")
-        try:
-            braw.decode("ascii")
-            check("bat 为纯 ASCII", True)
-        except UnicodeDecodeError:
-            check("bat 为纯 ASCII", False, "含非 ASCII（GBK 下会崩）")
+    for name in ("start.bat", "build_exe.bat"):
+        bat_path = os.path.join(here, name)
+        check(f"{name} 存在", os.path.isfile(bat_path))
+        if os.path.isfile(bat_path):
+            braw = open(bat_path, "rb").read()
+            bbare = braw.count(b"\n") - braw.count(b"\r\n")
+            check(f"{name} 换行为 CRLF", bbare == 0, f"bareLF={bbare}")
+            try:
+                braw.decode("ascii")
+                check(f"{name} 为纯 ASCII", True)
+            except UnicodeDecodeError:
+                check(f"{name} 为纯 ASCII", False, "含非 ASCII（GBK 下会崩）")
+
+    # 打包配置检查：build_exe.bat 必须带 --windowed，否则会弹出控制台
+    build_bat = os.path.join(here, "build_exe.bat")
+    if os.path.isfile(build_bat):
+        btxt = open(build_bat, "rb").read().decode("ascii", "replace")
+        check("打包使用 --windowed（无控制台）", "--windowed" in btxt)
+        # 默认必须是 onedir：onefile 的 bootloader 在部分机器上会卡住
+        check("打包默认 onedir（onefile 不可靠）",
+              "set \"MODE=--onedir\"" in btxt)
+        check("打包保留 onefile 可选", "--onefile" in btxt)
+        check("打包指定图标", "--icon" in btxt)
+
+    # 图标资源
+    ico_path = os.path.join(here, "app_icon.ico")
+    check("app_icon.ico 存在", os.path.isfile(ico_path))
+    if os.path.isfile(ico_path):
+        from PySide6.QtGui import QIcon
+        icon = QIcon(ico_path)
+        check("图标可被 Qt 解析", not icon.isNull())
+        ok_sizes = all(not icon.pixmap(s, s).isNull()
+                       for s in (16, 32, 48, 256))
+        check("图标多尺寸可用", ok_sizes)
+
+    # 已构建的 exe（如果存在）
+    exe_dir = os.path.join(here, "dist", "QtExplorer")
+    exe = os.path.join(exe_dir, "QtExplorer.exe")
+    if os.path.isfile(exe):
+        kb = os.path.getsize(exe) / 1024
+        internal = os.path.join(exe_dir, "_internal")
+        total_mb = sum(
+            os.path.getsize(os.path.join(r, f))
+            for r, _, fs in os.walk(exe_dir) for f in fs) / 1024 / 1024
+        print(f"  [INFO] exe {kb/1024:.1f} MB / 含依赖共 {total_mb:.0f} MB")
+        check("exe 已构建", kb > 500, f"{kb/1024:.1f} MB")
+        check("onedir 依赖目录存在", os.path.isdir(internal))
+        check("exe 非空", os.path.getsize(exe) > 1024 * 500)
+    else:
+        print("  [SKIP] dist/QtExplorer/QtExplorer.exe 尚未构建")
 
     w.close()
     app.processEvents()

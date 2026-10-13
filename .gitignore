@@ -42,3 +42,11 @@ desktop.ini
 
 # 测试日志（截图 shot_*.png 保留，README 需要）
 smoke.log
+
+# PyInstaller 打包产物（体积大，不入库）
+build/
+dist/
+*.spec
+
+# 打包过程中生成的临时文件
+*.log

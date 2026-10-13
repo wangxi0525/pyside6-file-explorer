@@ -14,12 +14,25 @@
 
 ## 快速开始
 
-**推荐：双击 `启动.vbs`** —— 无 cmd 窗口，界面直接弹出。
+### 方式一：打包成 exe（推荐，无需装 Python）
 
-也可以双击 `start.bat`（会保留一个控制台窗口，方便看错误），或在终端运行：
+![图标](app_icon.png)
+
+双击 `build_exe.bat` 打包，之后直接运行 `dist\QtExplorer\QtExplorer.exe`：
+
+- **不需要安装 Python**，Python 和 Qt 全部打包进去了
+- **不会弹出任何控制台窗口**
+- 可以整个文件夹拷走，或给 exe 建快捷方式
+
+> `dist\QtExplorer` 是一个文件夹，里面有 exe 和 `_internal` 依赖目录，
+> **两者必须放在一起**，exe 单独拷走会启动失败。
+
+### 方式二：从源码运行
+
+双击 `start.bat`，或在终端运行：
 
 ```bat
-start.bat# 直接启动
+start.bat# 直接启动（会保留控制台窗口）
 start.bat --check      # 自检：打印解释器路径与依赖版本，不启动界面
 start.bat D:\某个目录  # 启动后直接打开指定目录
 ```
@@ -36,7 +49,7 @@ start.bat D:\某个目录  # 启动后直接打开指定目录
 > .venv\Scripts\python.exe -m pip install PySide6
 > ```
 
-脚本内所有提示文字均为ASCII。原因：`.bat` 默认按 GBK 解析，混有中文时会出现
+脚本内所有提示文字均为 ASCII。原因：`.bat` 默认按 GBK 解析，混有中文时会出现
 `'[提示]' 不是内部或外部命令` 这类解析错误，与 `chcp` 设置无关。
 
 不想用批处理也可以直接运行：
@@ -101,24 +114,30 @@ python run.py
 
 ```
 file_explorer/
-├── run.py           # 入口：DPI 感知、字体、命令行参数
+├── run.py           # 入口：DPI 感知、图标、命令行参数（也是打包入口）
 ├── core.py          # 文件系统层：扫描、驱动器枚举、图标绘制、后台复制/删除、回收站
 ├── main_window.py   # UI 层：主窗口、驱动器侧栏、四个对话框、导航历史、主题
-├── smoke_test.py    # 55 项无界面测试
-├── 启动.vbs           # 双击启动，无 cmd 窗口
-└── start.bat        # 启动脚本（解释器探测、静默模式、自检模式）
+├── make_icon.py     # 生成 app_icon.ico（QPainter 绘制，多尺寸 ico）
+├── build_exe.bat    # PyInstaller 打包脚本
+├── verify_exe.py    # 枚举窗口验证 exe 是否真的显示 GUI
+├── app_icon.ico     # 应用图标（7 种尺寸）
+├── smoke_test.py    # 74 项无界面测试
+└── start.bat        # 从源码启动（解释器探测与自检模式）
 ```
 
 分层原则：**core.py 只管磁盘，main_window.py 只管界面**，两者不交叉，方便后续换存储后端或做单元测试。
 
 几个实现要点：
 
+- **打包用 `--windowed`**：编译期就决定不创建控制台，所以 exe 运行时不会有黑框
+- **默认 `--onedir` 而非 `--onefile`**：onefile 的 bootloader 在部分机器上会把进程
+  卡在 `PyInstaller Onefile Hidden Window`，GUI 永远不出现（实测踩过）。onedir 直接
+  运行 exe，没有中间层，更可靠
 - **驱动器枚举**用 `QStorageInfo` 而非 `os.listdir`，因为它能拿到卷标、文件系统类型和容量；卷标再用 Win32 `GetVolumeInformationW` 兜底读取
 - **图标全部代码绘制**，无外部图片依赖：文件按扩展名分 9 类配色，驱动器按磁盘/U盘/光驱/网络/主目录分别绘制
 - **后台线程**用 `QThread` + `Signal`，UI 线程只收信号刷新
 - **回收站**走 Windows Shell COM 的 `InvokeVerb('delete')`，跨平台时回退 `send2trash`
 - **矢量按钮图标**用 `QPainter` 画线条，避免 `←` `⟳` 等字符在缺字字体下变方块
-- **静默启动**：`启动.vbs` → `start.bat --run` → `pythonw.exe`。`pythonw` 不附加控制台，所以既没有黑框残留，也没有启动时的窗口闪烁
 
 ## 运行测试
 
@@ -126,11 +145,22 @@ file_explorer/
 QT_QPA_PLATFORM=offscreen python smoke_test.py
 ```
 
-覆盖尺寸格式化、目录扫描、三视图渲染、排序、搜索、选择、前进后退、空目录、无效路径，以及真实的复制、移动、冲突改名、删除。
+覆盖尺寸格式化、目录扫描、三视图渲染、排序、搜索、选择、前进后退、空目录、无效路径，
+以及真实的复制、移动、冲突改名、删除；另外检查启动脚本的编码换行与打包配置、图标多尺寸可用性、
+已构建 exe 是否存在。
+
+验证打包产物能否真正显示窗口（枚举 exe 的顶层窗口，确认 `visible=True` 且无控制台类窗口）：
+
+```bash
+python verify_exe.py
+```
 
 ## 已知的取舍
 
+- **打包产物是一个文件夹而非单个 exe**：exe 1.7 MB，但需要 `_internal` 依赖目录
+  （合计约 114 MB）才能运行。这是为绕开 onefile bootloader 卡死的问题，见上文实现要点
 - 删除对话框分「回收站」和「永久删除」两档，**没有 Undo**，误删需自行去回收站还原
 - 属性窗口对文件夹会递归统计子项，巨大的目录树（数十万文件）统计需要几秒
 - 不做磁盘占用分析和文件预览，属于取舍后的简化
 - 仅支持本机路径语义，跨平台差异（尤其 macOS/Linux 的删除语义）未做适配
+- 打包的 exe 只在 Windows 上可用；PySide6 本身跨平台，但本次未做 macOS/Linux 打包验证
