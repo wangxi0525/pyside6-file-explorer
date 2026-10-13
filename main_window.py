@@ -812,6 +812,9 @@ class Explorer(QMainWindow):
                                          self.toggle_sidebar)
         for b in (self.btn_back, self.btn_fwd, self.btn_up, self.btn_refresh):
             nl.addWidget(b)
+        # 侧栏开关必须真的加进布局，否则它是个游离控件——
+        # 既不显示也点不到，F9 隐藏后就再也回不来了。
+        nl.addWidget(self.btn_sidebar)
 
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("输入路径后回车")
@@ -1091,15 +1094,9 @@ class Explorer(QMainWindow):
             "QListWidget::item:selected{background:#BBDEFB;color:#0D47A1;}")
         v.addWidget(self.side_list, 1)
 
-        self.side_toggle = QToolButton()
-        self.side_toggle.setIcon(QIcon(_arrow_pixmap("menu", 16, "#78909C")))
-        self.side_toggle.setStyleSheet(
-            "QToolButton{border:none;background:transparent;color:#78909C;"
-            "padding:2px;}")
-        self.side_toggle.setToolTip("显示/隐藏侧边栏 (F9)")
-        self.side_toggle.setFixedSize(26, 22)
-        self.side_toggle.clicked.connect(self.toggle_sidebar)
-        v.addWidget(self.side_toggle, 0, Qt.AlignmentFlag.AlignHCenter)
+        # 开关按钮不放这里——侧栏隐藏后按钮也跟着消失，
+        # 就再也点不回来了。实际放在工具栏（_build_toolbar）。
+        self.side_toggle = None
 
         self.refresh_drives()
         return panel
@@ -1212,12 +1209,19 @@ class Explorer(QMainWindow):
         m.exec(self.cursor().pos())
 
     def toggle_sidebar(self):
-        if not hasattr(self, "sidebar"):
+        """
+        显示/隐藏侧栏。
+
+        开关按钮放在工具栏（btn_sidebar），侧栏自身内部不再放按钮——
+        否则侧栏一隐藏按钮也跟着消失，用户再也点不回来。
+        这里只改可见性，绝不禁用按钮。
+        """
+        sidebar = getattr(self, "sidebar", None)
+        if sidebar is None:
             return
-        visible = self.sidebar.isVisible()
-        self.sidebar.setVisible(not visible)
-        if hasattr(self, "side_toggle"):
-            self.side_toggle.setEnabled(not visible)
+        sidebar.setVisible(not sidebar.isVisible())
+        # 顺带把预览也收起来？不——预览是独立功能，保持原样。
+        # 若侧栏隐藏后 splitter 宽度需要归还，Qt 会自动处理。
 
     def apply_light_theme(self):
         """强制浅色外观，不跟随系统深色模式——文件管理器用浅底更易辨识。"""

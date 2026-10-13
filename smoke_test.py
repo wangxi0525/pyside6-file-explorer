@@ -297,6 +297,29 @@ def main():
     app.processEvents()
     check("侧栏可恢复显示", w.sidebar.isVisible())
 
+    # 回归：侧栏收起后必须还能用工具栏按钮恢复。
+    # 曾因切换按钮放在侧栏内部、且隐藏时被 setEnabled(False)，
+    # 导致一隐藏就再也回不来。
+    _sb = getattr(w, "btn_sidebar", None)
+    check("工具栏有侧栏开关按钮", _sb is not None)
+    if _sb is not None:
+        _sb.click()
+        app.processEvents()
+        _hidden = not w.sidebar.isVisible()
+        _enabled = _sb.isEnabled()
+        _visible = _sb.isVisible()
+        _sb.click()
+        app.processEvents()
+        check("工具栏按钮可收起侧栏", _hidden)
+        check("收起后按钮未被禁用", _enabled)
+        check("收起后按钮仍可见", _visible)
+        check("工具栏按钮可恢复侧栏", w.sidebar.isVisible())
+
+    from PySide6.QtWidgets import QToolButton as _QTB
+    _inner = w.sidebar.findChildren(_QTB)
+    check("侧栏内部无切换按钮（隐藏后点不到）", len(_inner) == 0,
+          f"侧栏内 {len(_inner)} 个")
+
     # 切回测试目录
     w.navigate(tmp)
     app.processEvents()
