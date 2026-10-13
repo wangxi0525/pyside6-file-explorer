@@ -418,6 +418,7 @@ class PreviewPane(QFrame):
             "QLabel{background:transparent;}")
 
         self.path = None
+        self._last_rendered = None     # 上次渲染的指纹，用于跳过重复渲染
         self._pending = None
         # 大目录扫描放后台线程，避免点一下就卡住
         self._busy = False
@@ -438,13 +439,13 @@ class PreviewPane(QFrame):
             "font-weight:600;color:#607D8B;background:transparent;")
         hl.addWidget(self.title)
         hl.addStretch()
-        self.btn_refresh = QToolButton()
-        self.btn_refresh.setIcon(QIcon(_arrow_pixmap("refresh", 15, "#78909C")))
-        self.btn_refresh.setFixedSize(24, 24)
-        self.btn_refresh.setToolTip("刷新预览")
-        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_refresh.clicked.connect(self.refresh)
-        hl.addWidget(self.btn_refresh)
+        self.btn_goto = QToolButton()
+        self.btn_goto.setIcon(QIcon(_arrow_pixmap("refresh", 15, "#78909C")))
+        self.btn_goto.setFixedSize(24, 24)
+        self.btn_goto.setToolTip("进入该文件夹")
+        self.btn_goto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_goto.clicked.connect(self.goto)
+        hl.addWidget(self.btn_goto)
         v.addWidget(head)
 
         # 滚动内容区
@@ -476,10 +477,11 @@ class PreviewPane(QFrame):
     def show_placeholder(self, text: str = None):
         self.scroll.setVisible(False)
         self.hint.setVisible(True)
+        self._last_rendered = None      # 清掉指纹，允许下次重新渲染
         if text:
             self.hint.setText(text)
         self.title.setText("预览")
-        self.btn_refresh.setEnabled(False)
+        self.btn_goto.setEnabled(False)
 
     # ---- 渲染 ----
     def _clear(self):
@@ -515,7 +517,7 @@ class PreviewPane(QFrame):
         self.path = path
         self.hint.setVisible(False)
         self.scroll.setVisible(True)
-        self.btn_refresh.setEnabled(True)
+        self.btn_goto.setEnabled(True)
 
         name = os.path.basename(path.rstrip("\\/")) or path
         self.title.setText(f"预览 · {name}"[:30])
@@ -548,8 +550,10 @@ class PreviewPane(QFrame):
                 item.setStyleSheet(
                     "background:transparent;color:#1565C0;font-size:12px;"
                     "padding:1px 0;")
-                item.setToolTip(dpath)
-                item.setCursor(Qt.CursorShape.PointingHandCursor)
+                # 只在名字被截断或超长时才提示完整路径，
+                # 否则鼠标扫过一整列会连续弹 tooltip，很吵
+                if len(dname) > 16 or len(dname) * 12 > self.width() - 60:
+                    item.setToolTip(dname)
                 item.mousePressEvent = (
                     lambda _e, p=dpath: self._open_requested.emit(p))
                 self.body_layout.addWidget(item)
@@ -567,9 +571,11 @@ class PreviewPane(QFrame):
                 row.setStyleSheet(
                     "background:transparent;color:#546E7A;font-size:11px;"
                     "padding:1px 0;")
-                row.setToolTip(
-                    f"{fname}\n{human_size(size)}  "
-                    f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}")
+                # 名称够短就不用 tooltip，避免刷屏
+                if len(fname) > 18 or len(fname) * 11 > self.width() - 90:
+                    row.setToolTip(
+                        f"{fname}\n{human_size(size)}  "
+                        f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}")
                 self.body_layout.addWidget(row)
             if len(info.files) > 30:
                 self._row(f"  …… 另有 {len(info.files) - 30} 个",
@@ -589,7 +595,7 @@ class PreviewPane(QFrame):
         self.path = path
         self.hint.setVisible(False)
         self.scroll.setVisible(True)
-        self.btn_refresh.setEnabled(False)
+        self.btn_goto.setEnabled(False)
 
         name = os.path.basename(path)
         self.title.setText("预览 · 文件")
@@ -618,7 +624,7 @@ class PreviewPane(QFrame):
         self.path = path
         self.hint.setVisible(False)
         self.scroll.setVisible(True)
-        self.btn_refresh.setEnabled(False)
+        self.btn_goto.setEnabled(False)
 
         name = os.path.basename(path)
         self.title.setText("预览 · 图片")
@@ -649,7 +655,8 @@ class PreviewPane(QFrame):
             pass
         self.body_layout.addStretch()
 
-    def refresh(self):
+    def goto(self):
+        """进入当前预览的路径（点标题栏的箭头按钮）。"""
         if self.path:
             self._open_requested.emit(self.path)
 
@@ -972,7 +979,7 @@ class Explorer(QMainWindow):
         self.preview_scanner.result.connect(self._on_preview_ready)
         self.preview_worker.start()
 
-    def request_preview(self, path: str):
+    def request_preview(self, path: str, force: bool = False):
         """请求预览某个路径（文件夹看内容，文件看信息）。"""
         pane = getattr(self, "preview", None)
         if pane is None or not self.preview_enabled:
@@ -982,6 +989,12 @@ class Explorer(QMainWindow):
             return
         if not os.path.exists(path):
             pane.show_placeholder("该项目已不存在")
+            return
+
+        # 同一个路径不重复触发。选中信号与手动调用可能对同一次选中
+        # 各调一遍，重复扫描 + 重建 widget 会让 tooltip 之类的
+        # 子窗口跟着反复出现。
+        if not force and pane.path == path and pane.path:
             return
 
         if os.path.isdir(path):
@@ -996,6 +1009,7 @@ class Explorer(QMainWindow):
             self.preview_scanner.request(path)
         else:
             ext = os.path.splitext(path)[1].lower()
+            pane.path = path
             if ext in IMAGE_EXTS:
                 pane.show_image(path)
             else:
@@ -1008,6 +1022,13 @@ class Explorer(QMainWindow):
             return
         if pane.path != path:
             return          # 期间用户又点了别的，丢弃这次结果
+        # 内容没变就别重建 widget：重建会让 tooltip 等子窗口
+        # 跟着反复出现关闭，看起来像程序在闪
+        if pane._last_rendered == (path, info.dir_count, info.file_count,
+                                  info.total_size):
+            return
+        pane._last_rendered = (path, info.dir_count, info.file_count,
+                              info.total_size)
         pane.show_folder(path, info)
 
     def _connect_table_selection(self):
@@ -1038,7 +1059,7 @@ class Explorer(QMainWindow):
         self.preview.setVisible(self.preview_enabled)
         if self.preview_enabled:
             sel = self.selected_paths()
-            self.request_preview(sel[0] if sel else self.cwd)
+            self.request_preview(sel[0] if sel else self.cwd, force=True)
         else:
             self.preview_scanner.cancel()
 

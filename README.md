@@ -88,6 +88,7 @@ python run.py
 - 扫描在后台线程进行，点开大目录界面也不卡；连续点击只渲染最后一次的结果
 - 多选或未选中时显示对应提示
 - `F12` 或菜单「预览窗格」开关
+- **单实例运行**：重复启动只会激活已有窗口，不会开出第二个主窗口
 
 ### 搜索
 
@@ -138,8 +139,10 @@ file_explorer/
 ├── make_icon.py     # 生成 app_icon.ico（QPainter 绘制，多尺寸 ico）
 ├── build_exe.bat    # PyInstaller 打包脚本
 ├── verify_exe.py    # 枚举窗口验证 exe 是否真的显示 GUI
-├── test_preview.py  # 预览窗格专项测试（38 项）
+├── test_preview.py  # 预览窗格专项测试（41 项）
+├── test_single_instance.py  # 单实例保护验证
 ├── app_icon.ico     # 应用图标（7 种尺寸）
+├── shoot_preview.py # 生成预览窗格演示截图
 ├── smoke_test.py    # 77 项无界面测试
 └── start.bat        # 从源码启动（解释器探测与自检模式）
 ```
@@ -154,6 +157,8 @@ file_explorer/
   运行 exe，没有中间层，更可靠
 - **预览扫描在后台线程**：`moveToThread` 之后必须用 `QMetaObject.invokeMethod`
   队列调用，**直接调用槽函数会被 Qt 拒绝**（对象不属于当前线程）
+- **单实例用命名互斥体**：名字带会话 id（`Local\QtExplorer_<名称>_<sid>`），
+  第二次启动时 `EnumWindows` 找到已有窗口并 `SetForegroundWindow` 激活，然后退出
 - **驱动器枚举**用 `QStorageInfo` 而非 `os.listdir`，因为它能拿到卷标、文件系统类型和容量；卷标再用 Win32 `GetVolumeInformationW` 兜底读取
 - **图标全部代码绘制**，无外部图片依赖：文件按扩展名分 9 类配色，驱动器按磁盘/U盘/光驱/网络/主目录分别绘制
 - **后台线程**用 `QThread` + `Signal`，UI 线程只收信号刷新

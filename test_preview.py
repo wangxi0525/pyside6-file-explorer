@@ -202,6 +202,43 @@ def main():
     w.request_preview("C:/绝对不存在的路径_xyz")
     check("无效路径不崩溃", True)
 
+    # 重复请求去重（曾导致 tooltip 等子窗口反复出现）
+    print("== 重复渲染防护 ==")
+    target = os.path.join(tmp, "子目录A")
+    calls = []
+    orig_show = w.preview.show_folder
+
+    def spy(path, inf):
+        calls.append(path)
+        return orig_show(path, inf)
+
+    w.preview.show_folder = spy
+    w.request_preview(target, force=True)
+    for _ in range(30):
+        app.processEvents()
+        w.preview_worker.wait(50)
+    first = len(calls)
+    check("首次请求会渲染", first >= 1, str(first))
+
+    for _ in range(5):
+        w.request_preview(target)
+        app.processEvents()
+        w.preview_worker.wait(50)
+    after = len(calls)
+    check("同路径重复请求不重复渲染", first == after,
+          f"{first} -> {after}")
+
+    # 内容变了仍要能刷新
+    with open(os.path.join(target, "新增.txt"), "w", encoding="utf-8") as f:
+        f.write("z" * 10)
+    w.preview.path = target
+    w.preview._last_rendered = None
+    w._on_preview_ready(target, core.scan_preview(target))
+    app.processEvents()
+    check("内容变化后可重新渲染", len(calls) > after,
+          f"{after} -> {len(calls)}")
+    w.preview.show_folder = orig_show
+
     # 关闭不应卡住（线程能停）
     w.close()
     app.processEvents()

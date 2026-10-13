@@ -42,8 +42,62 @@ def enable_dpi_awareness():
         pass
 
 
+def acquire_single_instance():
+    """
+    单实例保护：同一时间只允许一个主窗口。
+
+    用命名互斥体实现。若已有实例，则激活它并退出，
+    避免出现多个窗口同时被误触发出现在任务栏。
+    """
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+
+    # 名字里带上当前用户的会话 id，避免不同用户互相影响
+    sid = wintypes.DWORD()
+    kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(),
+                                 ctypes.byref(sid))
+    name = f"Local\\QtExplorer_{APP_NAME}_{sid.value}".replace(" ", "_")
+
+    handle = kernel32.CreateMutexW(None, True, name)
+    if not handle:
+        return None          # 拿不到互斥体就不拦，让程序照常跑
+
+    already = kernel32.GetLastError() == 183   # ERROR_ALREADY_EXISTS
+    if already:
+        # 找已有窗口并激活它
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        found = []
+
+        def cb(hwnd, _):
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            if APP_NAME in buf.value and user32.IsWindowVisible(hwnd):
+                found.append(hwnd)
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        for hwnd in found:
+            user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+        kernel32.CloseHandle(handle)
+        return False
+
+    return handle            # 首个实例，句柄要留着直到进程结束
+
+
 def main():
     enable_dpi_awareness()
+
+    mutex = acquire_single_instance()
+    if mutex is False:
+        return              # 已有实例在运行，已激活它，本进程退出
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
