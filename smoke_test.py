@@ -9,6 +9,7 @@ import tempfile
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 import core
@@ -197,6 +198,108 @@ def main():
     w.worker.wait()
     app.processEvents()
     check("永久删除成功", not os.path.exists(victim) and not errs, str(errs))
+
+    # ---- 驱动器侧边栏 ----
+    print("== 侧边栏 / 多盘访问 ==")
+    check("list_drives 有结果", len(core.list_drives()) > 0,
+          str(len(core.list_drives())))
+    drives = core.list_drives()
+    check("DriveInfo 字段完整",
+          all(hasattr(d, "name") and hasattr(d, "root") and hasattr(d, "kind")
+              for d in drives))
+    check("包含磁盘类卷", any(d.kind in ("disk", "removable", "cdrom")
+                          for d in drives),
+          str([(d.name, d.kind) for d in drives]))
+    check("磁盘有容量信息", any(d.total > 0 for d in drives),
+          str([(d.name, d.total) for d in drives][:3]))
+    check("图标能生成", not core.drive_icon_pixmap(drives[0]).isNull())
+    check("各类图标都能画",
+          all(not core.drive_icon_pixmap(
+              core.DriveInfo(name="t", root="C:\\", kind=k)).isNull()
+              for k in ("disk", "removable", "cdrom", "network", "home")))
+
+    check("侧栏已构建", hasattr(w, "side_list") and w.side_list.count() > 0,
+          str(w.side_list.count() if hasattr(w, "side_list") else -1))
+
+    # 每个可写盘都必须在侧栏可见（曾经的缩进 bug 导致磁盘整组消失）
+    disk_roots = [os.path.abspath(d.root) for d in drives
+                  if d.kind in ("disk", "removable")]
+    side_roots = []
+    for i in range(w.side_list.count()):
+        r = w.side_list.item(i).data(Qt.ItemDataRole.UserRole)
+        if r:
+            side_roots.append(os.path.abspath(r))
+    check("侧栏列出所有磁盘",
+          all(any(sr == dr or sr.startswith(dr) for sr in side_roots)
+              for dr in disk_roots),
+          f"drives={disk_roots} sidebar={side_roots}")
+
+    # fstype 要是 str 而不是 QByteArray，否则 tooltip 显示成 b'NTFS'
+    fstypes = [d.fstype for d in drives if d.kind != "home"]
+    check("fstype 是字符串",
+          all(isinstance(f, str) for f in fstypes), str(fstypes))
+    check("fstype 非空", any(fstypes), str(fstypes))
+
+    # 有容量的卷应带一行容量摘要
+    cap_rows = sum(
+        1 for i in range(w.side_list.count())
+        if "可用" in (w.side_list.item(i).text() or ""))
+    check("侧栏显示容量摘要", cap_rows >= len(disk_roots), str(cap_rows))
+
+    # 定位到 C 盘根目录
+    win_drive = next((d for d in drives if d.kind in ("disk", "removable")), None)
+    if win_drive:
+        w.navigate(win_drive.root)
+        app.processEvents()
+        check("能打开磁盘根目录",
+              os.path.abspath(w.cwd) == os.path.abspath(win_drive.root), w.cwd)
+        check("磁盘根目录可渲染",
+              w.stack.currentWidget() is not w._empty_widget
+              or w.list_table.rowCount() > 0,
+              f"empty={w.stack.currentWidget() is w._empty_widget}")
+
+        #侧栏应高亮当前盘
+        cur = w.side_list.currentRow()
+        cur_root = (w.side_list.item(cur).data(Qt.ItemDataRole.UserRole)
+                    if cur >= 0 else None)
+        check("侧栏高亮当前盘",
+              cur_root and os.path.abspath(cur_root) ==
+              os.path.abspath(win_drive.root), str(cur_root))
+
+    # 切换到另一个盘（若有第二个盘）
+    other = next((d for d in drives if d.kind in ("disk", "removable")
+                  and os.path.abspath(d.root) !=
+                  os.path.abspath(win_drive.root if win_drive else "")), None)
+    if other:
+        w.navigate(other.root)
+        app.processEvents()
+        check("能切换到其它盘",
+              os.path.abspath(w.cwd) == os.path.abspath(other.root), w.cwd)
+
+    # 点击侧栏项导航
+    real_idx = next((i for i in range(w.side_list.count())
+                     if w.side_list.item(i).data(Qt.ItemDataRole.UserRole)), None)
+    if real_idx is not None:
+        w._side_clicked(w.side_list.item(real_idx))
+        app.processEvents()
+        check("点击侧栏可导航", os.path.isdir(w.cwd), w.cwd)
+
+    # 重新枚举不应崩溃
+    w.refresh_drives()
+    app.processEvents()
+    check("refresh_drives 不崩", w.side_list.count() > 0)
+
+    # 隐藏/显示侧栏
+    w.toggle_sidebar()
+    app.processEvents()
+    check("侧栏可隐藏", not w.sidebar.isVisible())
+    w.toggle_sidebar()
+    app.processEvents()
+    check("侧栏可恢复显示", w.sidebar.isVisible())
+
+    # 切回测试目录
+    w.navigate(tmp)
+    app.processEvents()
 
     w.close()
     app.processEvents()

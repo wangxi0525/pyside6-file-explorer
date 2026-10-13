@@ -12,8 +12,9 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from PySide6.QtCore import QObject, QThread, Signal
-from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont
+from PySide6.QtCore import QObject, QThread, Signal, QDir, QPoint
+from PySide6.QtGui import (QIcon, QPixmap, QColor, QPainter, QPen, QFont,
+                          QPolygon)
 
 # ---------------------------------------------------------------- 图标 / 主题
 
@@ -340,3 +341,158 @@ def scan_dir(path: str, show_hidden: bool = False, limit: int = 20000) -> DirSca
 
 def unique_name(path: str) -> str:
     return _unique(path)
+
+
+# ---------------------------------------------------------------- 驱动器
+
+@dataclass
+class DriveInfo:
+    """一个可访问的磁盘 / 卷。"""
+    name: str          # 显示名，如 "系统盘 (C:)"
+    root: str          # 根路径，如 "C:\\"
+    label: str = ""    # 卷标
+    fstype: str = ""   # 文件系统
+    total: int = 0     # 总字节
+    free: int = 0      # 剩余字节
+    kind: str = "disk" # disk / cdrom / removable / network / home
+
+
+def _pretty_volume_label(root: str) -> str:
+    """用 Win32 API 读卷标，失败就退回盘符。"""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(261)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(root), buf, 260,
+            None, None, None, None, 0)
+        return buf.value if ok else ""
+    except Exception:
+        return ""
+
+
+def list_drives() -> list[DriveInfo]:
+    """
+    枚举所有可用卷。用 QStorageInfo 而不是 os.listdir，因为它能拿到
+    卷标、文件系统类型和容量，这些对用户是有用信息。
+    """
+    from PySide6.QtCore import QStorageInfo, QStandardPaths
+
+    out: list[DriveInfo] = []
+
+    # 常用目录做成快捷入口。PySide6 里 QDir 没有 desktopPath()，
+    # 这类位置统一走 QStandardPaths。
+    loc = QStandardPaths.StandardLocation
+    quick = [
+        (QDir.homePath(), "主目录"),
+        (QStandardPaths.writableLocation(loc.DesktopLocation), "桌面"),
+        (QStandardPaths.writableLocation(loc.DownloadLocation), "下载"),
+        (QStandardPaths.writableLocation(loc.DocumentsLocation), "文档"),
+        (QStandardPaths.writableLocation(loc.MusicLocation), "音乐"),
+        (QStandardPaths.writableLocation(loc.MoviesLocation), "视频"),
+        (QStandardPaths.writableLocation(loc.PicturesLocation), "图片"),
+    ]
+    seen = set()
+    for path, name in quick:
+        if path and path not in seen and os.path.isdir(path):
+            seen.add(path)
+            out.append(DriveInfo(name=name, root=path, kind="home"))
+
+    for si in QStorageInfo.mountedVolumes():
+        root = si.rootPath()
+        if os.name == "nt":
+            # Windows 上 root 形如 "C:/"，统一成反斜杠便于 os.path 使用
+            root = root.replace("/", "\\")
+            if len(root) == 3 and root[1] == ":":
+                root += "\\"
+
+        d = DriveInfo(name=root.rstrip("\\") or root, root=root)
+        d.label = si.displayName()
+        # Qt 6 的 fileSystemType() 返回 QByteArray，必须转成 str，
+        # 否则 tooltip 里会显示成 b'NTFS'
+        fst = si.fileSystemType()
+        d.fstype = bytes(fst).decode("utf-8", "replace") if fst else ""
+        d.total = si.bytesTotal()
+        d.free = si.bytesAvailable()
+
+        if os.name != "nt":
+            if not os.path.isdir(root):
+                continue          # 未挂载的空槽位
+            d.kind = "disk"
+        elif si.isReadOnly():
+            d.kind = "cdrom"
+        elif os.access(root, os.W_OK):
+            d.kind = "disk"
+        else:
+            d.kind = "removable"
+
+        label = _pretty_volume_label(root)
+        # QStorageInfo.displayName() 在无卷标时会返回 "D:/" 这种路径，
+        # 拿它当卷标会让显示变成 "D:/ (D:)"，必须过滤掉
+        if (label and label not in ("", "System Volume Information")
+                and label not in (root, root.rstrip("\\"))):
+            d.name = f"{label} ({d.name})"
+        if d.kind == "cdrom" and not label:
+            d.name = f"光驱 ({d.name})"
+
+        out.append(d)
+
+    # 可写磁盘排前面，同类按盘符排
+    def order(d: DriveInfo):
+        kind_rank = {"disk": 0, "removable": 1, "network": 2, "cdrom": 3}
+        return (kind_rank.get(d.kind, 4), d.root.upper())
+
+    drives = [d for d in out if d.kind != "home"]
+    homes = [d for d in out if d.kind == "home"]
+    return homes + sorted(drives, key=order)
+
+
+def drive_icon_pixmap(d: DriveInfo, size: int = 24) -> QPixmap:
+    """按驱动器类型画图标：磁盘 / U盘 / 光驱 / 网络。"""
+    pm = QPixmap(size, size)
+    pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    palette = {"disk": ("#42A5F5", "#1E88E5"),
+               "removable": ("#66BB6A", "#43A047"),
+               "cdrom": ("#AB47BC", "#8E24AA"),
+               "network": ("#FFA726", "#FB8C00"),
+               "home": ("#78909C", "#546E7A")}
+    light, dark = palette.get(d.kind, palette["disk"])
+
+    if d.kind == "home":
+        # 房子轮廓：墙身 + 屋顶，整体占满画布以免太小看不清
+        p.setPen(QPen(QColor(dark), 1.2))
+        p.setBrush(QColor(light))
+        cx = size / 2
+        roof_y = size * 0.16
+        wall_top = size * 0.52
+        wall_bottom = size * 0.88
+        half = size * 0.30
+        p.drawPolygon(QPolygon([
+            QPoint(int(cx), int(roof_y)),
+            QPoint(int(cx + half + size * 0.07), int(wall_top)),
+            QPoint(int(cx + half), int(wall_top)),
+            QPoint(int(cx + half), int(wall_bottom)),
+            QPoint(int(cx - half), int(wall_bottom)),
+            QPoint(int(cx - half), int(wall_top)),
+            QPoint(int(cx - half - size * 0.07), int(wall_top)),
+        ]))
+    else:
+        # 驱动器盒体
+        p.setPen(QColor(dark))
+        p.setBrush(QColor(light))
+        p.drawRoundedRect(int(size * 0.10), int(size * 0.30),
+                          int(size * 0.80), int(size * 0.46), 4, 4)
+        p.setBrush(QColor("#ECEFF1"))
+        p.setPen(QColor(dark))
+        if d.kind == "cdrom":
+            p.drawEllipse(int(size * 0.32), int(size * 0.38),
+                          int(size * 0.36), int(size * 0.14))
+        else:
+            p.drawRect(int(size * 0.68), int(size * 0.46),
+                       int(size * 0.10), int(size * 0.10))
+    p.end()
+    return pm

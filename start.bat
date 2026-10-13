@@ -68,6 +68,10 @@ if /i "%~1"=="--check" (
   exit /b 0
 )
 
+REM --run is passed by the VBS launcher: no console output, and the
+REM command window closes on its own once the GUI comes up.
+if /i "%~1"=="--run" goto :launch_silent
+
 echo [RUN] Starting Qt File Explorer...
 echo.
 "%PY%" run.py %*
@@ -78,5 +82,21 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+exit /b 0
+
+:launch_silent
+shift
+REM Prefer pythonw.exe: it has no console attached at all, so nothing
+REM is left on screen. Fall back to python.exe if pythonw is missing.
+set "PYW="
+for %%I in ("%PY%") do set "PYDIR=%%~dpI"
+if exist "%PYDIR%pythonw.exe" set "PYW=%PYDIR%pythonw.exe"
+
+if defined PYW (
+  start "" "%PYW%" run.py %*
+) else (
+  start "" "%PY%" run.py %*
+)
+exit /b 0
 
 endlocal

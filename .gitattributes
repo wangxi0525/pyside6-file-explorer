@@ -1,5 +1,6 @@
 # Windows 批处理必须用 CRLF，否则双击可能无法正常解析
 *.bat text eol=crlf
+*.vbs text eol=crlf
 
 # Python 与 Markdown 统一 LF
 *.py text eol=lf

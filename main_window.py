@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout,
     QWidget, QAbstractItemView as AIV)
 
-from core import (DirScan, Worker, human_size, icon_for, is_hidden, kind_of,
+from core import (DirScan, DriveInfo, Worker, drive_icon_pixmap,
+                  human_size, icon_for, is_hidden, kind_of, list_drives,
                   open_in_explorer, open_terminal, scan_dir, send2trash,
                   unique_name, EXT_COLOR_MAP)
 
@@ -65,10 +66,11 @@ class GoToDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 20, 20, 14)
         quick = QHBoxLayout()
-        for label, path in (("桌面", QDir.desktopPath()),
-                            ("文档", QDir.homePath()),
-                            ("下载", os.path.join(QDir.homePath(), "Downloads")),
-                            ("图片", os.path.join(QDir.homePath(), "Pictures")),
+        loc = QStandardPaths.StandardLocation
+        for label, path in (("桌面", QStandardPaths.writableLocation(loc.DesktopLocation)),
+                            ("文档", QStandardPaths.writableLocation(loc.DocumentsLocation)),
+                            ("下载", QStandardPaths.writableLocation(loc.DownloadLocation)),
+                            ("图片", QStandardPaths.writableLocation(loc.PicturesLocation)),
                             ("主页", QDir.homePath())):
             b = QPushButton(label)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -383,6 +385,8 @@ class Explorer(QMainWindow):
         self.btn_fwd = self._nav_btn("right", "前进 (Alt+→)", self.go_forward)
         self.btn_up = self._nav_btn("up", "上一级 (Alt+↑)", self.go_up)
         self.btn_refresh = self._nav_btn("refresh", "刷新 (F5)", self.refresh)
+        self.btn_sidebar = self._nav_btn("menu", "显示/隐藏侧边栏 (F9)",
+                                         self.toggle_sidebar)
         for b in (self.btn_back, self.btn_fwd, self.btn_up, self.btn_refresh):
             nl.addWidget(b)
 
@@ -498,7 +502,20 @@ class Explorer(QMainWindow):
         lay.setSpacing(0)
         lay.addWidget(nav)
         lay.addWidget(crumb)
-        lay.addWidget(self.stack, 1)
+
+        # 左侧驱动器栏 + 右侧内容区，中间可拖拽调节
+        self.sidebar = self._build_sidebar()
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.stack)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setCollapsible(0, True)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setSizes([210, 970])
+        self.splitter.setHandleWidth(4)
+        lay.addWidget(self.splitter, 1)
+
         pl = QVBoxLayout()
         pl.setContentsMargins(12, 4, 12, 6)
         pl.addWidget(self.progress)
@@ -509,6 +526,160 @@ class Explorer(QMainWindow):
 
         # 快捷键
         self._install_shortcuts()
+
+    def _build_sidebar(self):
+        """左侧栏：常用目录 + 所有磁盘分区。"""
+        panel = QFrame()
+        panel.setObjectName("sidebar")
+        panel.setMinimumWidth(150)
+        panel.setStyleSheet(
+            "QFrame#sidebar{background:#FAFAFA;border-right:1px solid #E0E0E0;}")
+
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 8, 0, 8)
+        v.setSpacing(0)
+
+        self.side_list = QListWidget()
+        self.side_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.side_list.setSpacing(1)
+        self.side_list.setUniformItemSizes(False)
+        self.side_list.setMouseTracking(True)
+        self.side_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.side_list.customContextMenuRequested.connect(
+            self._side_context_menu)
+        self.side_list.itemClicked.connect(self._side_clicked)
+        self.side_list.setStyleSheet(
+            "QListWidget{background:transparent;}"
+            "QListWidget::item{border-radius:6px;margin:1px 6px;padding:2px;}"
+            "QListWidget::item:hover{background:#EEEEEE;}"
+            "QListWidget::item:selected{background:#BBDEFB;color:#0D47A1;}")
+        v.addWidget(self.side_list, 1)
+
+        self.side_toggle = QToolButton()
+        self.side_toggle.setIcon(QIcon(_arrow_pixmap("menu", 16, "#78909C")))
+        self.side_toggle.setStyleSheet(
+            "QToolButton{border:none;background:transparent;color:#78909C;"
+            "padding:2px;}")
+        self.side_toggle.setToolTip("显示/隐藏侧边栏 (F9)")
+        self.side_toggle.setFixedSize(26, 22)
+        self.side_toggle.clicked.connect(self.toggle_sidebar)
+        v.addWidget(self.side_toggle, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.refresh_drives()
+        return panel
+
+    def refresh_drives(self):
+        """重新枚举磁盘与快捷目录，保留当前选中项。"""
+        if not hasattr(self, "side_list"):
+            return
+        current = self.cwd
+        self.side_list.blockSignals(True)
+        self.side_list.clear()
+        self._drive_items = []
+
+        try:
+            drives = list_drives()
+        except Exception:
+            drives = []
+
+        homes = [d for d in drives if d.kind == "home"]
+        disks = [d for d in drives if d.kind != "home"]
+
+        def add(d: DriveInfo):
+            it = QListWidgetItem(d.name)
+            it.setIcon(QIcon(drive_icon_pixmap(d)))
+            it.setData(Qt.ItemDataRole.UserRole, d.root)
+            tip = d.root
+            if d.fstype:
+                tip += f"\n{d.fstype}"
+            if d.total:
+                used = human_size(d.total - d.free)
+                tip += (f"\n已用 {used} / 共 {human_size(d.total)}"
+                        f"  ({d.free / d.total * 100:.0f}% 可用)")
+            it.setToolTip(tip)
+            self.side_list.addItem(it)
+            self._drive_items.append(d)
+            # 有容量的卷在名称后追加一行紧凑的剩余空间，扫一眼就能判断
+            if d.total > 0 and d.kind != "home":
+                used_pct = int((d.total - d.free) / d.total * 100)
+                sub = QListWidgetItem(f"    {human_size(d.free)} 可用 · {used_pct}% 已用")
+                sub.setFlags(Qt.ItemFlag.NoItemFlags)
+                f = sub.font()
+                f.setPointSizeF(max(7.0, f.pointSizeF() - 1.0))
+                sub.setFont(f)
+                sub.setForeground(QColor("#FF7043" if used_pct >= 90 else "#90A4AE"))
+                self.side_list.addItem(sub)
+
+        if homes:
+            head = self._side_header("位置")
+            for d in homes:
+                add(d)
+        if disks:
+            head = self._side_header("此电脑")
+            for d in disks:
+                add(d)
+
+        self.side_list.blockSignals(False)
+        self._sync_side_selection(current)
+
+    def _side_header(self, text):
+        it = QListWidgetItem(text)
+        f = it.font()
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        f.setBold(True)
+        it.setFont(f)
+        it.setForeground(QColor("#90A4AE"))
+        it.setFlags(Qt.ItemFlag.NoItemFlags)      # 不可选中
+        self.side_list.addItem(it)
+        return it
+
+    def _sync_side_selection(self, path: str):
+        """让侧栏跟随当前目录高亮对应项。"""
+        path = os.path.abspath(path)
+        best = -1
+        best_len = -1
+        for i in range(self.side_list.count()):
+            it = self.side_list.item(i)
+            root = it.data(Qt.ItemDataRole.UserRole)
+            if not root:
+                continue
+            r = os.path.abspath(root)
+            if path == r or path.startswith(r.rstrip("\\/") + os.sep):
+                # 取最长匹配，避免 / 盘抢了 C:\Users 的高亮
+                if len(r) > best_len:
+                    best_len, best = len(r), i
+        self.side_list.setCurrentRow(best)
+
+    def _side_clicked(self, item):
+        root = item.data(Qt.ItemDataRole.UserRole)
+        if root and os.path.isdir(root):
+            self.navigate(root)
+
+    def _side_context_menu(self, pos):
+        item = self.side_list.itemAt(pos)
+        if not item:
+            return
+        root = item.data(Qt.ItemDataRole.UserRole)
+        if not root or not os.path.isdir(root):
+            return
+        m = QMenu(self)
+        m.addAction("打开", lambda: self.navigate(root))
+        m.addAction("在新窗口打开", lambda: self._open_in_new_window(root))
+        m.addAction("复制路径", lambda: self._copy_text(root))
+        m.addSeparator()
+        m.addAction("在资源管理器中打开", lambda: open_in_explorer(root))
+        m.addAction("在此处打开命令行", lambda: open_terminal(root))
+        m.addSeparator()
+        m.addAction("属性", lambda: PropertiesDialog(root, self).exec())
+        m.exec(self.cursor().pos())
+
+    def toggle_sidebar(self):
+        if not hasattr(self, "sidebar"):
+            return
+        visible = self.sidebar.isVisible()
+        self.sidebar.setVisible(not visible)
+        if hasattr(self, "side_toggle"):
+            self.side_toggle.setEnabled(not visible)
 
     def apply_light_theme(self):
         """强制浅色外观，不跟随系统深色模式——文件管理器用浅底更易辨识。"""
@@ -607,6 +778,8 @@ class Explorer(QMainWindow):
         act("Backspace", self.go_up)
         act("Space", self.action_toggle_view)
         act("Alt+Enter", self.action_properties)
+        act("F9", self.toggle_sidebar)
+        act("Ctrl+R", self.refresh_drives)
 
     # ---------------- 导航
 
@@ -640,10 +813,12 @@ class Explorer(QMainWindow):
         if res.error:
             self.stack.setCurrentWidget(self._empty_widget)
             self.status_label.setText(res.error)
+            self._sync_side_selection(self.cwd)
             return
         self._render(res)
         self._update_crumbs()
         self._update_nav_buttons()
+        self._sync_side_selection(self.cwd)
         self.path_edit.setText(self.cwd)
 
     def go_back(self):
