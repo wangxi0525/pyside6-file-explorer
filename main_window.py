@@ -461,12 +461,13 @@ class PreviewPane(QFrame):
         v.addWidget(self.scroll, 1)
 
         # 空状态提示
-        self.hint = QLabel("选中一个文件夹\n即可在此预览其下级内容")
+        self.hint = QLabel("预览窗格\n\n在左侧点选一个文件夹\n这里会显示它的下级内容")
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet(
-            "color:#B0BEC5;background:#FAFAFA;font-size:12px;padding:0 22px;")
-        v.addWidget(self.hint)
+            "color:#90A4AE;background:#FAFAFA;font-size:12px;"
+            "padding:0 14px;border:1px dashed #CFD8DC;border-radius:6px;")
+        v.addWidget(self.hint, 1)
         self.scroll.setVisible(False)
 
         self.show_placeholder()
