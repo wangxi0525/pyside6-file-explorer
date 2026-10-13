@@ -914,19 +914,22 @@ class DriveItemWidget(QWidget):
     原来是「一行盘符 + 一行容量文字」两条列表项，现在合并成一条。
     """
 
-    def __init__(self, d: DriveInfo, parent=None):
+    def __init__(self, d: DriveInfo, parent=None, compact: bool = False):
         super().__init__(parent)
         self.root = d.root
+        # 紧凑模式：用于「位置」组的主目录等，没有容量条，
+        # 单行显示即可，省纵向空间
+        self.compact = compact
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 4, 8, 4)
+        lay.setContentsMargins(6, 2 if compact else 4, 8, 2 if compact else 4)
         lay.setSpacing(8)
 
         icon = QLabel()
         pm = drive_icon_pixmap(d)
         if not pm.isNull():
             icon.setPixmap(pm)
-        icon.setFixedSize(22, 22)
+        icon.setFixedSize(18 if compact else 22, 18 if compact else 22)
         icon.setStyleSheet("background:transparent;")
         lay.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -961,7 +964,8 @@ class DriveItemWidget(QWidget):
         else:
             top.addStretch(1)
 
-        if d.total > 0:
+        # 紧凑模式不显示容量信息（主目录没有需要关注的剩余空间）
+        if d.total > 0 and not compact:
             used_pct = int((d.total - d.free) / d.total * 100)
             # 侧栏宽度有限，这里只放百分比；完整的剩余/总量在 tooltip 里。
             # 容量条已经图形化了，文字不必重复占用横向空间。
@@ -987,7 +991,7 @@ class DriveItemWidget(QWidget):
 
         # QListWidgetItem 的默认高度按图标算（约 22px），装不下图标 +
         # 两行内容 + 容量条，会把文字裁掉。显式给出足够的高度。
-        self.setMinimumHeight(46)
+        self.setMinimumHeight(30 if compact else 46)
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Fixed)
 
@@ -1030,6 +1034,10 @@ def _arrow_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
     elif kind == "up":
         p.drawLine(int(c - 5), int(c + 2), int(c), int(c - 3))
         p.drawLine(int(c), int(c - 3), int(c + 5), int(c + 2))
+    elif kind == "down":
+        # 之前漏了这个分支，传 "down" 会画出空白图标
+        p.drawLine(int(c - 5), int(c - 2), int(c), int(c + 3))
+        p.drawLine(int(c), int(c + 3), int(c + 5), int(c - 2))
     elif kind == "refresh":
         r = size * 0.30
         p.drawArc(int(c - r), int(c - r), int(r * 2), int(r * 2),
@@ -1440,11 +1448,13 @@ class Explorer(QMainWindow):
         def add(d: DriveInfo):
             # 用自定义 widget 把「盘符 + 容量」合并成一条，
             # 容量用图形条表示，不再额外占一行列表项
+            is_home = d.kind == "home"
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, d.root)
-            # 列表项高度要放得下 widget（含容量条的两行）
-            item.setSizeHint(QSize(0, 46))
-            widget = DriveItemWidget(d)
+            # 分区项要放得下 widget（图标 + 两行 + 容量条，46px）；
+            # 位置项没有容量条，用矮得多的紧凑样式
+            item.setSizeHint(QSize(0, 30 if is_home else 46))
+            widget = DriveItemWidget(d, compact=is_home)
             self.side_list.addItem(item)
             self.side_list.setItemWidget(item, widget)
             self._drive_widgets.append((item, widget))
@@ -1454,6 +1464,13 @@ class Explorer(QMainWindow):
             """按该组的收起状态决定是否真正加入列表。"""
             return group not in self._side_collapsed
 
+        if disks:
+            # 盘符在最上（最高频入口），收藏夹紧随其后，位置放最后
+            self._side_header("此电脑", group="disk")
+            for d in disks:
+                if emit("disk"):
+                    add(d)
+
         # 收藏夹
         favs = load_favorites()
         if favs:
@@ -1462,13 +1479,6 @@ class Explorer(QMainWindow):
                 if emit("fav"):
                     self._add_fav_item(p)
 
-        if disks:
-            # 磁盘在上、快捷位置在下：盘符是最高频的跳转入口，
-            # 放最上面一伸手就能点到
-            self._side_header("此电脑", group="disk")
-            for d in disks:
-                if emit("disk"):
-                    add(d)
         if homes:
             self._side_header("位置", group="home")
             for d in homes:
@@ -1495,10 +1505,11 @@ class Explorer(QMainWindow):
         it.setData(Qt.ItemDataRole.UserRole + 1, group)  # 存组名
         it.setData(Qt.ItemDataRole.UserRole + 2, collapsed)
         # 箭头提示可展开/收起
+        # 箭头：收起状态 -> 向下（提示可展开）；展开状态 -> 向上（提示可收起）
         it.setIcon(QIcon(_arrow_pixmap(
-            "up" if collapsed else "down", 12, "#90A4AE")))
+            "down" if collapsed else "up", 12, "#90A4AE")))
         it.setFlags(Qt.ItemFlag.ItemIsEnabled)         # 可点击（但不可选中）
-        it.setSizeHint(QSize(0, 24))
+        it.setSizeHint(QSize(0, 22))
         if group:
             self._side_groups.append((group, it))
         self.side_list.addItem(it)
@@ -1527,7 +1538,8 @@ class Explorer(QMainWindow):
 
     def _add_fav_item(self, path):
         """侧栏里的一条收藏项。"""
-        it = QListWidgetItem()
+        name = os.path.basename(path.rstrip("\\/")) or path
+        it = QListWidgetItem(name)          # 必须带文本，否则只显示图标
         it.setData(Qt.ItemDataRole.UserRole, path)
         it.setToolTip(path)
         it.setIcon(icon_for(path, os.path.isdir(path), 18))

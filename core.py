@@ -244,15 +244,37 @@ def _count_files(path: str) -> int:
     return max(n, 1)
 
 
+def _no_window_kwargs() -> dict:
+    """
+    隐藏子进程的控制台窗口。
+
+    CREATE_NO_WINDOW 只在创建时带才有效，它同时保证不会闪出黑框。
+    不这么做的后果：调用 PowerShell 时控制台会闪一下，
+    在 GUI 程序里非常显眼（用户以为程序出问题了）。
+    """
+    if os.name != "nt":
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE       # 0 = SW_HIDE
+    return {
+        "startupinfo": si,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+
+
 def send2trash(path: str) -> None:
     """丢进回收站。优先用系统自带的 way，失败再退回永久删除。"""
     if os.name == "nt":
-        # Windows: 用 PowerShell 的 Shell.Application 走回收站
+        # Windows: 用 PowerShell 的 Shell.Application 走回收站。
+        # 必须隐藏窗口，否则每删一次就闪一个控制台黑框。
         ps = ("$shell = New-Object -ComObject Shell.Application; "
               "$item = $shell.Namespace(0).ParseName("
               f"'{path}'); $item.InvokeVerb('delete')")
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                           capture_output=True, timeout=30)
+        r = subprocess.run(["powershell", "-NoProfile", "-WindowStyle",
+                            "Hidden", "-Command", ps],
+                           capture_output=True, timeout=30,
+                           **_no_window_kwargs())
         # Shell 的 delete 是异步的，等一小会儿确认文件是否真的走了
         for _ in range(20):
             if not os.path.exists(path):
@@ -287,7 +309,14 @@ def open_terminal(path: str) -> None:
     """在当前目录开一个命令行窗口。"""
     if os.name == "nt":
         cmd = os.environ.get("COMSPEC", "cmd.exe")
-        subprocess.Popen(f'start "cmd" /d "{path}" {cmd}', shell=True)
+        # 这里要显示新窗口，所以**不能**用 CREATE_NO_WINDOW
+        #（它会让 start 失效）。但仍要设 SW_HIDE 把中间的 shell 藏掉，
+        # 否则双击后先闪一下黑框再弹出目标窗口。
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        subprocess.Popen(f'start "cmd" /d "{path}" {cmd}', shell=True,
+                         startupinfo=si)
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-a", "Terminal", path])
     else:

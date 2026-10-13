@@ -17,6 +17,19 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
+# 兜底隐藏控制台：从源码用 python.exe 启动时（而非 pythonw.exe），
+# Windows 会附带一个控制台窗口。这里用 FreeConsole 把它摘掉，
+# 打包 exe 时本就不会有控制台，这段只在源码运行时起作用。
+if os.name == "nt" and not getattr(sys, "frozen", False):
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # 先判断自己是否独占控制台，独占才摘，避免影响父进程
+        if kernel32.GetConsoleProcessList(None, 0) == 1:
+            kernel32.FreeConsole()
+    except Exception:
+        pass
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication

@@ -167,6 +167,84 @@ def main():
                     break
             app.processEvents()
             check("再次点击收起", "home" in w._side_collapsed)
+
+        print("== 5. 箭头方向 ==")
+        # 收起时应显示向下（可展开），展开时向上（可收起）
+        def arrow_ink(row_idx):
+            """
+            返回 (不透明像素数, 上半部分像素数)。
+            上半部分多= 向上箭头（∧），下半部分多 = 向下箭头（∨），
+            据此判断方向，而不只是判断「有没有画出来」。
+            """
+            from PySide6.QtGui import QImage
+            it = w.side_list.item(row_idx)
+            ic = it.icon()
+            if ic.isNull():
+                return 0, 0
+            pm = ic.pixmap(12, 12)
+            img = pm.toImage().convertToFormat(
+                QImage.Format.Format_ARGB32)
+            pts = [(x, y) for y in range(img.height())
+                   for x in range(img.width())
+                   if img.pixelColor(x, y).alpha() > 20]
+            half = img.height() / 2
+            upper = sum(1 for _, y in pts if y < half)
+            return len(pts), upper
+
+        w.refresh_drives()
+        app.processEvents()
+        # 先收起 home，再看箭头
+        if "home" not in w._side_collapsed:
+            for i in range(w.side_list.count()):
+                if w.side_list.item(i).data(
+                        _Qt.ItemDataRole.UserRole + 1) == "home":
+                    click_item(w.side_list, i)
+                    break
+        app.processEvents()
+        home_row = next(
+            (i for i in range(w.side_list.count())
+             if w.side_list.item(i).data(
+                 _Qt.ItemDataRole.UserRole + 1) == "home"), None)
+        check("找到位置标题", home_row is not None)
+        if home_row is not None:
+            n_c, up_c = arrow_ink(home_row)
+            check("收起状态的箭头已绘制（非空白）", n_c > 0,
+                  f"{n_c} 像素")
+            # 收起 -> 向下箭头 -> 像素集中在下半部分
+            check("收起时箭头朝下（可展开）", up_c * 2 < n_c,
+                  f"上半 {up_c} / 总 {n_c}")
+
+        # 展开后再看，箭头应朝上
+        if home_row is not None:
+            click_item(w.side_list, home_row)
+            app.processEvents()
+            row2 = next(
+                (i for i in range(w.side_list.count())
+                 if w.side_list.item(i).data(
+                     _Qt.ItemDataRole.UserRole + 1) == "home"), None)
+            n_e, up_e = arrow_ink(row2) if row2 is not None else (0, 0)
+            check("展开状态的箭头已绘制", n_e > 0, f"{n_e} 像素")
+            check("展开时箭头朝上（可收起）", up_e * 2 > n_e,
+                  f"上半 {up_e} / 总 {n_e}")
+
+        print("== 6. 收藏项显示名称 ==")
+        core.save_favorites([sub])
+        w.refresh_drives()
+        app.processEvents()
+        fav_items = [
+            w.side_list.item(i) for i in range(w.side_list.count())
+            if w.side_list.item(i).data(
+                _Qt.ItemDataRole.UserRole + 1) is None
+            and w.side_list.item(i).data(_Qt.ItemDataRole.UserRole) == sub]
+        check("收藏项存在", len(fav_items) == 1, str(len(fav_items)))
+        if fav_items:
+            check("收藏项有文字（非空）", bool(fav_items[0].text().strip()),
+                  repr(fav_items[0].text()))
+            check("收藏项文字是文件夹名",
+                  fav_items[0].text() == "项目",
+                  repr(fav_items[0].text()))
+            check("收藏项有图标", not fav_items[0].icon().isNull())
+        core.save_favorites([])
     finally:
         if old_appdata is None:
             os.environ.pop("APPDATA", None)
