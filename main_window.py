@@ -9,7 +9,8 @@ from datetime import datetime
 
 from PySide6.QtCore import (Qt, QDir, QSize, QTimer, QStandardPaths,
                             QPropertyAnimation, QEasingCurve, Signal,
-                            QThread, QObject, QMetaObject, Q_ARG, Slot)
+                            QThread, QObject, QMetaObject, Q_ARG, Slot,
+                            QRectF)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices,
                            QDragEnterEvent, QDropEvent, QGuiApplication,
                            QKeySequence, QIcon, QPainter, QPen, QPixmap)
@@ -32,6 +33,120 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
 
 APP_NAME = "Qt 资源管理器"
 APP_VERSION = "1.01"
+
+
+# ---------------------------------------------------------------- 主题
+
+def _theme_path() -> str:
+    """主题配置文件：%APPDATA%/QtExplorer/theme.json"""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "QtExplorer")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(d, "theme.json")
+
+
+def load_theme() -> str:
+    """读取主题名，默认 light。"""
+    import json
+    try:
+        with open(_theme_path(), encoding="utf-8") as f:
+            v = json.load(f)
+        return v.get("theme", "light")
+    except (OSError, ValueError, AttributeError):
+        return "light"
+
+
+def save_theme(name: str) -> None:
+    """保存主题名。"""
+    import json
+    try:
+        with open(_theme_path(), "w", encoding="utf-8") as f:
+            json.dump({"theme": name}, f)
+    except OSError:
+        pass
+
+
+# 配色表：深浅两套。新增控件只需在这里加一个键，
+# 不必维护两份完整样式表。
+THEMES = {
+    "light": {
+        "bg": "#FFFFFF", "alt_bg": "#FAFAFA", "fg": "#37474F",
+        "muted": "#90A4AE", "dim": "#607D8B", "faint": "#B0BEC5",
+        "border": "#DDE3E9", "grid": "#EEEEEE", "border2": "#E0E0E0",
+        "accent": "#1565C0", "accent_bg": "#BBDEFB",
+        "hover": "#E3F2FD", "accent2": "#64B5F6",
+        "sel_fg": "#0D47A1", "bar_bg": "#E3E7EA",
+        "dir_fg": "#1565C0", "file_fg": "#546E7A",
+    },
+    "dark": {
+        "bg": "#1E2429", "alt_bg": "#232A31", "fg": "#CFD8DC",
+        "muted": "#7E8B94", "dim": "#90A4AE", "faint": "#5A666E",
+        "border": "#333C44", "grid": "#2A3238", "border2": "#3A444C",
+        "accent": "#64B5F6", "accent_bg": "#2C4A63",
+        "hover": "#2A3540", "accent2": "#1976D2",
+        "sel_fg": "#90CAF9", "bar_bg": "#333C44",
+        "dir_fg": "#64B5F6", "file_fg": "#B0BEC5",
+    },
+}
+
+
+def build_qss(c: dict) -> str:
+    """由配色字典生成全局样式表。"""
+    return f"""
+    QWidget {{ background:{c['bg']}; color:{c['fg']}; font-size:13px; }}
+    QListWidget, QTableWidget {{
+        background:{c['bg']}; alternate-background-color:{c['alt_bg']}; }}
+    QListWidget::item {{ color:{c['fg']}; }}
+    QListWidget::item:selected, QTableWidget::item:selected {{
+        background:{c['accent_bg']}; color:{c['sel_fg']}; }}
+    QListWidget::item:hover {{ background:{c['hover']}; }}
+    QTableWidget {{ gridline-color:{c['grid']}; }}
+    QHeaderView::section {{
+        background:{c['alt_bg']}; color:{c['dim']}; padding:6px; border:none;
+        border-bottom:1px solid {c['border2']};
+        border-right:1px solid {c['grid']}; }}
+    QToolButton {{ color:{c['dim']}; background:transparent; border:none;
+                  border-radius:6px; font-size:15px; }}
+    QToolButton:hover {{ background:{c['hover']}; color:{c['accent']}; }}
+    QToolButton:disabled {{ color:{c['faint']}; }}
+    QLineEdit {{ background:{c['bg']}; color:{c['fg']};
+                border:1px solid {c['border']}; border-radius:6px;
+                padding:5px 8px; }}
+    QLineEdit:focus {{ border:1px solid {c['accent2']}; }}
+    QPushButton {{ background:{c['bg']}; color:{c['fg']};
+                  border:1px solid {c['border']}; border-radius:6px;
+                  padding:6px 12px; }}
+    QPushButton:hover {{ background:{c['hover']};
+                         border-color:{c['accent_bg']}; }}
+    QDialogButtonBox QPushButton {{ min-width:72px; }}
+    QMenu {{ background:{c['bg']}; border:1px solid {c['border2']};
+             padding:4px; }}
+    QMenu::item {{ padding:7px 24px 7px 12px; border-radius:4px; }}
+    QMenu::item:selected {{ background:{c['hover']}; color:{c['accent']}; }}
+    QMenu::separator {{ height:1px; background:{c['grid']};
+                       margin:4px 8px; }}
+    QStatusBar {{ background:{c['alt_bg']}; color:{c['muted']}; }}
+    QProgressBar {{ border:1px solid {c['border2']}; border-radius:4px;
+                   background:{c['bg']}; text-align:center;
+                   color:{c['dim']}; }}
+    QProgressBar::chunk {{ background:{c['accent2']}; border-radius:3px; }}
+    QScrollBar:vertical {{ background:{c['alt_bg']}; width:10px; margin:0; }}
+    QScrollBar:handle:vertical {{ background:{c['border2']};
+                                 border-radius:5px; min-height:30px; }}
+    QScrollBar:handle:vertical:hover {{ background:{c['muted']}; }}
+    QScrollBar:add-line, QScrollBar:sub-line {{ height:0; width:0; }}
+    QScrollBar:horizontal {{ background:{c['alt_bg']}; height:10px; }}
+    QScrollBar:handle:horizontal {{ background:{c['border2']};
+                                   border-radius:5px; min-width:30px; }}
+    QScrollBar:add-page, QScrollBar:sub-page {{ background:transparent; }}
+    QLabel {{ background:transparent; }}
+    QToolTip {{ background:{c['alt_bg']}; color:{c['fg']};
+                border:1px solid {c['border2']}; padding:4px 6px; }}
+    QSplitter::handle {{ background:{c['grid']}; }}
+    """
 
 # 预览面板里直接显示缩略图的图片格式
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico"}
@@ -430,9 +545,11 @@ class EntryRow(QWidget):
 
     def __init__(self, icon: QPixmap, text: str, tail: str = "",
                  color: str = "#546E7A", size: int = 11,
-                 tooltip: str = "", path: str = "", parent=None):
+                 tooltip: str = "", path: str = "", is_dir: bool = False,
+                 parent=None):
         super().__init__(parent)
         self.path = path
+        self.is_dir_row = is_dir
         self._hover = False
         self._selected = False
         self._loading = False
@@ -541,6 +658,11 @@ class EntryRow(QWidget):
         if not getattr(self, "_loading", False):
             self.setToolTip(tip)
 
+    def apply_theme(self, c: dict):
+        """按主题重刷配色（内联样式优先级高于全局 qss，必须逐个设置）。"""
+        self._base_color = c["accent"] if self.is_dir_row else c["file_fg"]
+        self._restyle()
+
     def set_active(self, on: bool):
         """兼容旧的选中联动接口。"""
         self.set_selected(on)
@@ -620,6 +742,19 @@ class PreviewPane(QFrame):
         self.show_placeholder()
 
     # ---- 占位状态 ----
+    def apply_theme(self, c: dict):
+        """按主题刷新预览面板自身与内部文字。"""
+        self._c = c
+        self.setStyleSheet(
+            f"QFrame{{background:{c['bg']};border-left:1px solid {c['grid']};}}")
+        self.title.setStyleSheet(
+            f"background:transparent;color:{c['dim']};font-size:11px;")
+        self.hint.setStyleSheet(
+            f"color:{c['muted']};background:{c['bg']};font-size:12px;"
+            f"padding:0 14px;border:1px dashed {c['border2']};border-radius:6px;")
+        for r in self.body.findChildren(EntryRow):
+            r.apply_theme(c)
+
     def show_placeholder(self, text: str = None):
         self.scroll.setVisible(False)
         self.hint.setVisible(True)
@@ -659,10 +794,11 @@ class PreviewPane(QFrame):
 
     def _entry_row(self, icon: QPixmap, text: str, tail: str = "",
                    color: str = "#546E7A", size: int = 11,
-                   indent: int = 0, tooltip: str = "", path: str = ""):
+                   indent: int = 0, tooltip: str = "", path: str = "",
+                   is_dir: bool = False):
         """预览面板里的一行：图标 + 名称 + 右侧附加信息。整行可点。"""
         row = EntryRow(icon, text, tail=tail, color=color, size=size,
-                       tooltip=tooltip, path=path)
+                       tooltip=tooltip, path=path, is_dir=is_dir)
         if path:
             row.doubleClicked.connect(self._on_entry_double_clicked)
             row.clicked.connect(self._on_entry_selected)
@@ -728,7 +864,7 @@ class PreviewPane(QFrame):
                 self._entry_row(
                     _small_icon(dpath, True), dname,
                     color="#1565C0", size=12,
-                    tooltip=dpath, path=dpath)   # 点击进入该文件夹
+                    tooltip=dpath, path=dpath, is_dir=True)   # 点击进入该文件夹
             if len(info.dirs) > 30:
                 self._row(f"  …… 另有 {len(info.dirs) - 30} 个",
                           color="#B0BEC5", size=11)
@@ -746,7 +882,7 @@ class PreviewPane(QFrame):
                     # 点击用系统默认程序打开
                     tooltip=f"{full}\n{human_size(size)}  "
                             f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}",
-                    path=full)
+                    path=full, is_dir=False)
             if len(info.files) > 30:
                 self._row(f"  …… 另有 {len(info.files) - 30} 个",
                           color="#B0BEC5", size=11)
@@ -888,13 +1024,17 @@ class UsageBar(QWidget):
         self.setFixedHeight(5)
         self.setStyleSheet("background:transparent;")
 
+    def apply_theme(self, c: dict):
+        """按主题更新容量条底槽颜色。"""
+        self._track = c["bar_bg"]
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         r = h / 2
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#E3E7EA"))                  # 底槽
+        p.setBrush(QColor(getattr(self, "_track", "#E3E7EA")))   # 底槽
         p.drawRoundedRect(0, 0, w, h, r, r)
         if self.pct >= 90:
             fill = QColor("#EF5350")                   # 快满了，红色警示
@@ -1003,14 +1143,36 @@ class DriveItemWidget(QWidget):
                     f"  (已用 {int((d.total - d.free) / d.total * 100)}%)")
         self.setToolTip(tip)
 
+        # 记下各控件引用，切换主题时按新配色重刷
+        self._l_name = name
+        self._l_vol = locals().get("vol")
+        self._l_pct = locals().get("free_t")
+        self._bar = locals().get("bar")
+        self._is_active = False
+        self._c = THEMES["light"]
+
+    def apply_theme(self, c: dict):
+        """按主题重刷文字与容量条颜色。"""
+        self._c = c
+        self._l_name.setStyleSheet(
+            f"background:transparent;color:{c['fg']};font-size:13px;")
+        if self._l_vol is not None:
+            self._l_vol.setStyleSheet(
+                f"background:transparent;color:{c['muted']};font-size:11px;")
+        if self._l_pct is not None:
+            self._l_pct.setStyleSheet(
+                f"background:transparent;color:{c['muted']};font-size:11px;")
+        if self._bar is not None:
+            self._bar.apply_theme(c)
+            self._bar.update()
+
     def set_active(self, on: bool):
-        """选中时把主文字改为深蓝，在蓝底上更清晰。"""
-        for lab in self.findChildren(QLabel):
-            cur = lab.styleSheet()
-            if "color:#37474F" in cur:
-                lab.setStyleSheet(cur.replace(
-                    "color:#37474F",
-                    "color:#0D47A1" if on else "color:#37474F"))
+        """选中时把主文字改为高亮色，在选中底上更清晰。"""
+        self._is_active = on
+        c = getattr(self, "_c", THEMES["light"])
+        self._l_name.setStyleSheet(
+            f"background:transparent;color:{c['sel_fg'] if on else c['fg']};"
+            f"font-size:13px;")
 
 
 # ---------------------------------------------------------------- 主窗口
@@ -1046,6 +1208,33 @@ def _arrow_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
     elif kind == "menu":
         for i, dy in enumerate((-5, 0, 5)):
             p.drawLine(int(c - 5), int(c + dy), int(c + 5), int(c + dy))
+    elif kind == "sun":
+        # 太阳：圆心 + 8 道光芒
+        pen.setWidthF(1.5)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        r = size * 0.22
+        p.drawEllipse(QRectF(c - r, c - r, r * 2, r * 2))
+        for k in range(8):
+            import math
+            ang = k * math.pi / 4
+            r1, r2 = size * 0.32, size * 0.46
+            p.drawLine(int(c + math.cos(ang) * r1),
+                       int(c + math.sin(ang) * r1),
+                       int(c + math.cos(ang) * r2),
+                       int(c + math.sin(ang) * r2))
+    elif kind == "moon":
+        # 月牙：画一个圆再用背景色圆"咬"掉一块
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        r = size * 0.40
+        p.drawEllipse(QRectF(c - r, c - r, r * 2, r * 2))
+        # 用透明背景的圆挖出月牙
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+        r2 = size * 0.38
+        p.drawEllipse(QRectF(c - r2 + size * 0.22, c - r2 - size * 0.10,
+                             r2 * 2, r2 * 2))
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
     p.end()
     return pm
 
@@ -1135,6 +1324,13 @@ class Explorer(QMainWindow):
         # 侧栏开关必须真的加进布局，否则它是个游离控件——
         # 既不显示也点不到，F9 隐藏后就再也回不来了。
         nl.addWidget(self.btn_sidebar)
+
+        # 主题切换：显示当前主题对应的图标（浅色显示月亮，
+        # 点它切到夜间；夜间显示太阳，点它切回浅色）
+        self.btn_theme = QToolButton()
+        self.btn_theme.setFixedSize(26, 22)
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        nl.addWidget(self.btn_theme)
 
         self.path_edit = QLineEdit()
         self.path_edit.setPlaceholderText("输入路径后回车")
@@ -1279,6 +1475,8 @@ class Explorer(QMainWindow):
         lay.addLayout(pl)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
+        # 恢复上次选的主题（默认浅色）
+        self.theme = load_theme()
         self.apply_light_theme()
 
         # 快捷键
@@ -1629,46 +1827,89 @@ class Explorer(QMainWindow):
         # 若侧栏隐藏后 splitter 宽度需要归还，Qt 会自动处理。
 
     def apply_light_theme(self):
-        """强制浅色外观，不跟随系统深色模式——文件管理器用浅底更易辨识。"""
-        qss = """
-        QWidget { background:#FFFFFF; color:#37474F; font-size:13px; }
-        QListWidget, QTableWidget { background:#FFFFFF; alternate-background-color:#FAFAFA; }
-        QListWidget::item { color:#37474F; }
-        QListWidget::item:selected, QTableWidget::item:selected {
-            background:#BBDEFB; color:#0D47A1; }
-        QTableWidget { gridline-color:#EEEEEE; }
-        QHeaderView::section {
-            background:#FAFAFA; color:#607D8B; padding:6px; border:none;
-            border-bottom:1px solid #E0E0E0; border-right:1px solid #F0F0F0; }
-        QToolButton { color:#546E7A; background:transparent; border:none;
-                      border-radius:6px; font-size:15px; }
-        QToolButton:hover { background:#E3F2FD; color:#1565C0; }
-        QToolButton:disabled { color:#CFD8DC; }
-        QLineEdit { background:#FFFFFF; color:#37474F;
-                    border:1px solid #DDE3E9; border-radius:6px; padding:5px 8px; }
-        QLineEdit:focus { border:1px solid #64B5F6; }
-        QPushButton { background:#FFFFFF; color:#37474F;
-                      border:1px solid #DDE3E9; border-radius:6px; padding:6px 12px; }
-        QPushButton:hover { background:#F5F7FA; border-color:#BBDEFB; }
-        QDialogButtonBox QPushButton { min-width:72px; }
-        QMenu { background:#FFFFFF; border:1px solid #E0E0E0; padding:4px; }
-        QMenu::item { padding:7px 24px 7px 12px; border-radius:4px; }
-        QMenu::item:selected { background:#E3F2FD; color:#1565C0; }
-        QMenu::separator { height:1px; background:#EEEEEE; margin:4px 8px; }
-        QStatusBar { background:#FAFAFA; color:#78909C; }
-        QProgressBar { border:1px solid #E0E0E0; border-radius:4px;
-                       background:#FFFFFF; text-align:center; color:#546E7A; }
-        QProgressBar::chunk { background:#64B5F6; border-radius:3px; }
-        QScrollBar:vertical { background:#FAFAFA; width:10px; margin:0; }
-        QScrollBar::handle:vertical { background:#CFD8DC; border-radius:5px; min-height:30px; }
-        QScrollBar::handle:vertical:hover { background:#B0BEC5; }
-        QScrollBar::add-line, QScrollBar::sub-line { height:0; width:0; }
-        QScrollBar:horizontal { background:#FAFAFA; height:10px; }
-        QScrollBar::handle:horizontal { background:#CFD8DC; border-radius:5px; min-width:30px; }
-        QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }
-        QLabel { background:transparent; }
+        """应用当前主题（保留旧名以兼容既有调用点）。"""
+        self._apply_theme(getattr(self, "theme", "light"))
+
+    def _apply_theme(self, name: str):
+        """切换主题并刷新所有内联着色的控件。"""
+        self.theme = name if name in THEMES else "light"
+        c = THEMES[self.theme]
+        self._c = c
+        self.setStyleSheet(build_qss(c))
+        self._refresh_theme_icon()
+        self._repaint_widgets_for_theme()
+
+    def toggle_theme(self):
+        """在浅色 / 夜间之间切换，并持久化选择。"""
+        new = "dark" if getattr(self, "theme", "light") == "light" else "light"
+        self._apply_theme(new)
+        save_theme(new)
+        self.statusBar().showMessage(
+            "已切换到夜间主题" if new == "dark" else "已切换到浅色主题", 1500)
+
+    def _repaint_widgets_for_theme(self):
         """
-        self.setStyleSheet(qss)
+        刷新内联写死了颜色的控件。
+
+        预览条目、容量条、侧栏分区这几处当初用 setStyleSheet 逐个设色，
+        内联样式优先级高于全局 qss，不逐个重刷的话夜间主题下会
+        出现深底深字完全看不清。
+        """
+        c = self._c
+        try:
+            for r in self.preview.body.findChildren(EntryRow):
+                r.apply_theme(c)
+            self.preview.apply_theme(c)
+            for item, widget in getattr(self, "_drive_widgets", []):
+                widget.apply_theme(c)
+            self.side_list.setStyleSheet(
+                "QListWidget{background:%s;}"
+                "QListWidget::item{border-radius:6px;margin:1px 6px;padding:2px;}"
+                "QListWidget::item:hover{background:%s;}"
+                "QListWidget::item:selected{background:%s;color:%s;}"
+                % (c["bg"], c["hover"], c["accent_bg"], c["sel_fg"]))
+        except Exception:
+            pass
+        self._refresh_side_headers()
+        self._refresh_preview_text()
+
+    def _refresh_side_headers(self):
+        """重刷侧栏分组标题颜色。"""
+        c = self._c
+        for row in range(self.side_list.count()):
+            it = self.side_list.item(row)
+            if it.data(Qt.ItemDataRole.UserRole + 1):
+                it.setForeground(QColor(c["dim"]))
+
+    def _refresh_preview_text(self):
+        """让当前预览内容按新主题重绘一次。"""
+        try:
+            path = self.preview.path
+            if not path:
+                return
+            self.preview._last_rendered = None      # 绕过去重，强制重绘
+            if os.path.isdir(path):
+                self.request_preview(path, force=True)
+            else:
+                ext = os.path.splitext(path)[1].lower()
+                if ext in IMAGE_EXTS:
+                    self.preview.show_image(path)
+                else:
+                    self.preview.show_file(path)
+        except Exception:
+            pass
+
+    def _refresh_theme_icon(self):
+        """更新主题按钮的图标与提示。"""
+        btn = getattr(self, "btn_theme", None)
+        if btn is None:
+            return
+        dark = getattr(self, "theme", "light") == "dark"
+        # 当前是浅色 -> 显示月亮（提示可切到夜间）；反之显示太阳
+        kind = "sun" if dark else "moon"
+        color = "#FFD54F" if dark else "#78909C"
+        btn.setIcon(QIcon(_arrow_pixmap(kind, 17, color)))
+        btn.setToolTip("切换到浅色主题" if dark else "切换到夜间主题")
 
     def _empty_page(self):
         page = QWidget()
@@ -1729,6 +1970,7 @@ class Explorer(QMainWindow):
         act("Ctrl+R", self.refresh_drives)
         act("F1", self.action_about)
         act("F12", self.toggle_preview)
+        act("Ctrl+Alt+T", self.toggle_theme)
 
     # ---------------- 导航
 
