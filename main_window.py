@@ -8,7 +8,8 @@ import sys
 from datetime import datetime
 
 from PySide6.QtCore import (Qt, QDir, QSize, QTimer, QStandardPaths,
-                            QPropertyAnimation, QEasingCurve)
+                            QPropertyAnimation, QEasingCurve, Signal,
+                            QThread, QObject, QMetaObject, Q_ARG, Slot)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices,
                            QDragEnterEvent, QDropEvent, QGuiApplication,
                            QKeySequence, QIcon, QPainter, QPen, QPixmap)
@@ -17,16 +18,20 @@ from PySide6.QtWidgets import (
     QFileDialog, QFileSystemModel, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QProgressBar, QPushButton, QSplitter, QStackedWidget, QStatusBar,
+    QScrollArea,
     QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout,
     QWidget, QAbstractItemView as AIV)
 
-from core import (DirScan, DriveInfo, Worker, drive_icon_pixmap,
+from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   human_size, icon_for, is_hidden, kind_of, list_drives,
-                  open_in_explorer, open_terminal, scan_dir, send2trash,
-                  unique_name, EXT_COLOR_MAP)
+                  open_in_explorer, open_terminal, scan_dir, scan_preview,
+                  send2trash, unique_name, EXT_COLOR_MAP)
 
 APP_NAME = "Qt 资源管理器"
 APP_VERSION = "1.0"
+
+# 预览面板里直接显示缩略图的图片格式
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico"}
 
 # ---------------------------------------------------------------- 自定义对话框
 
@@ -330,6 +335,324 @@ class FileCard(QFrame):
         lay.addStretch()
 
 
+# ---------------------------------------------------------------- 预览扫描线程
+
+class _PreviewScanner(QObject):
+    """
+    在后台线程里扫描预览目录。
+
+    注意：request() 由 UI 线程调用，而本对象已 moveToThread 到后台线程，
+    所以必须用 QMetaObject.invokeMethod 走队列，不能直接调用槽函数——
+    直接调用会被 Qt 拒绝（对象不属于当前线程）。
+    """
+
+    result = Signal(str, object)     # path, PreviewInfo
+
+    def __init__(self, show_hidden: bool = False):
+        super().__init__()
+        self._show_hidden = show_hidden
+        self._queue: list[str] = []
+        self._busy = False
+
+    def set_show_hidden(self, flag: bool):
+        """UI 线程调用，同样要排队到后台线程。"""
+        QMetaObject.invokeMethod(self, "_set_hidden",
+                                 Qt.ConnectionType.QueuedConnection,
+                                 Q_ARG(bool, flag))
+
+    @Slot(bool)
+    def _set_hidden(self, flag: bool):
+        self._show_hidden = flag
+
+    def request(self, path: str):
+        """UI 线程调用：排队到后台线程执行。"""
+        QMetaObject.invokeMethod(self, "_enqueue", Qt.ConnectionType.QueuedConnection,
+                                 Q_ARG(str, path))
+
+    def cancel(self):
+        QMetaObject.invokeMethod(self, "_clear", Qt.ConnectionType.QueuedConnection)
+
+    @Slot(str)
+    def _enqueue(self, path: str):
+        # 连续点击时只保留最新一个请求，前面的作废
+        self._queue = [path]
+        self._pump()
+
+    @Slot()
+    def _clear(self):
+        self._queue.clear()
+
+    @Slot()
+    def _pump(self):
+        if self._busy or not self._queue:
+            return
+        path = self._queue.pop(0)
+        self._busy = True
+        try:
+            info = scan_preview(path, show_hidden=self._show_hidden)
+        except Exception as e:                       # 兜底，别让线程死掉
+            info = PreviewInfo(path=path, error=str(e))
+        self._busy = False
+        self.result.emit(path, info)
+        if self._queue:                # 期间又来了新请求
+            self._pump()
+
+
+# ---------------------------------------------------------------- 预览面板
+
+class PreviewPane(QFrame):
+    """
+    预览窗格：选中文件夹时在右侧显示其下级内容。
+    选中文件时则显示文件的基本信息。
+    """
+
+    # 预览面板里点击子文件夹 -> 主窗口导航过去
+    _open_requested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("preview")
+        self.setMinimumWidth(190)
+        self.setStyleSheet(
+            "QFrame#preview{background:#FAFAFA;border-left:1px solid #E0E0E0;}"
+            "QLabel{background:transparent;}")
+
+        self.path = None
+        self._pending = None
+        # 大目录扫描放后台线程，避免点一下就卡住
+        self._busy = False
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # 顶部：标题 + 刷新按钮
+        head = QFrame()
+        head.setFixedHeight(32)
+        head.setStyleSheet(
+            "QFrame{background:#FFFFFF;border-bottom:1px solid #EEEEEE;}")
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(12, 4, 6, 4)
+        self.title = QLabel("预览")
+        self.title.setStyleSheet(
+            "font-weight:600;color:#607D8B;background:transparent;")
+        hl.addWidget(self.title)
+        hl.addStretch()
+        self.btn_refresh = QToolButton()
+        self.btn_refresh.setIcon(QIcon(_arrow_pixmap("refresh", 15, "#78909C")))
+        self.btn_refresh.setFixedSize(24, 24)
+        self.btn_refresh.setToolTip("刷新预览")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.clicked.connect(self.refresh)
+        hl.addWidget(self.btn_refresh)
+        v.addWidget(head)
+
+        # 滚动内容区
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background:#FAFAFA;")
+        self.body = QWidget()
+        self.body.setStyleSheet("background:#FAFAFA;")
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(12, 10, 12, 12)
+        self.body_layout.setSpacing(6)
+        self.scroll.setWidget(self.body)
+        v.addWidget(self.scroll, 1)
+
+        # 空状态提示
+        self.hint = QLabel("选中一个文件夹\n即可在此预览其下级内容")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet(
+            "color:#B0BEC5;background:#FAFAFA;font-size:12px;padding:0 22px;")
+        v.addWidget(self.hint)
+        self.scroll.setVisible(False)
+
+        self.show_placeholder()
+
+    # ---- 占位状态 ----
+    def show_placeholder(self, text: str = None):
+        self.scroll.setVisible(False)
+        self.hint.setVisible(True)
+        if text:
+            self.hint.setText(text)
+        self.title.setText("预览")
+        self.btn_refresh.setEnabled(False)
+
+    # ---- 渲染 ----
+    def _clear(self):
+        while self.body_layout.count():
+            it = self.body_layout.takeAt(0)
+            w = it.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _row(self, text: str, bold: bool = False, color: str = "#37474F",
+             size: int = 12, icon_pm=None):
+        lab = QLabel(text)
+        if bold:
+            f = lab.font()
+            f.setBold(True)
+            lab.setFont(f)
+        lab.setStyleSheet(
+            f"background:transparent;color:{color};font-size:{size}px;")
+        lab.setWordWrap(True)
+        self.body_layout.addWidget(lab)
+        return lab
+
+    def _divider(self):
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#E8E8E8;border:none;")
+        self.body_layout.addWidget(line)
+
+    def show_folder(self, path: str, info):
+        """渲染文件夹预览。"""
+        self._clear()
+        self.path = path
+        self.hint.setVisible(False)
+        self.scroll.setVisible(True)
+        self.btn_refresh.setEnabled(True)
+
+        name = os.path.basename(path.rstrip("\\/")) or path
+        self.title.setText(f"预览 · {name}"[:30])
+        self._row(name, bold=True, size=13)
+
+        if info.error:
+            self._row(f"无法读取\n{info.error}", color="#EF5350")
+            return
+
+        # 概要
+        self._row(f"{info.dir_count} 个文件夹")
+        self._row(f"{info.file_count} 个文件")
+        self._row(f"本层大小 {human_size(info.total_size)}")
+        if info.dir_count:
+            deep = info.deep_bytes if info.deep_files else 0
+            txt = f"含下级共 {info.deep_files:,} 个文件"
+            if deep:
+                txt += f" · {human_size(deep)}"
+            if info.deep_truncated:
+                txt += "（统计已截断）"
+            self._row(txt, color="#78909C", size=11)
+
+        self._divider()
+
+        # 子文件夹
+        if info.dirs:
+            self._row("文件夹", bold=True, color="#607D8B", size=11)
+            for dname, dpath in info.dirs[:30]:
+                item = QLabel(f"  {dname}")
+                item.setStyleSheet(
+                    "background:transparent;color:#1565C0;font-size:12px;"
+                    "padding:1px 0;")
+                item.setToolTip(dpath)
+                item.setCursor(Qt.CursorShape.PointingHandCursor)
+                item.mousePressEvent = (
+                    lambda _e, p=dpath: self._open_requested.emit(p))
+                self.body_layout.addWidget(item)
+            if len(info.dirs) > 30:
+                self._row(f"  …… 另有 {len(info.dirs) - 30} 个",
+                          color="#B0BEC5", size=11)
+
+        # 文件
+        if info.files:
+            if info.dirs:
+                self._divider()
+            self._row("文件", bold=True, color="#607D8B", size=11)
+            for fname, size, mt in info.files[:30]:
+                row = QLabel(f"  {fname}    {human_size(size)}")
+                row.setStyleSheet(
+                    "background:transparent;color:#546E7A;font-size:11px;"
+                    "padding:1px 0;")
+                row.setToolTip(
+                    f"{fname}\n{human_size(size)}  "
+                    f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}")
+                self.body_layout.addWidget(row)
+            if len(info.files) > 30:
+                self._row(f"  …… 另有 {len(info.files) - 30} 个",
+                          color="#B0BEC5", size=11)
+
+        if info.truncated:
+            self._row("（内容过多，仅显示部分）", color="#FF7043", size=11)
+
+        if not info.dirs and not info.files:
+            self._row("空文件夹", color="#B0BEC5")
+
+        self.body_layout.addStretch()
+
+    def show_file(self, path: str):
+        """渲染文件信息预览。"""
+        self._clear()
+        self.path = path
+        self.hint.setVisible(False)
+        self.scroll.setVisible(True)
+        self.btn_refresh.setEnabled(False)
+
+        name = os.path.basename(path)
+        self.title.setText("预览 · 文件")
+        self._row(name, bold=True, size=13)
+        self._divider()
+
+        try:
+            st = os.stat(path)
+        except OSError as e:
+            self._row(f"无法读取\n{e}", color="#EF5350")
+            return
+
+        self._row(f"类型  {kind_of(name)}文件", color="#607D8B", size=11)
+        self._row(f"大小  {human_size(st.st_size)}")
+        self._row(f"      {st.st_size:,} 字节", color="#B0BEC5", size=10)
+        self._divider()
+        self._row("修改  " + datetime.fromtimestamp(st.st_mtime)
+                  .strftime("%Y-%m-%d %H:%M"), color="#607D8B", size=11)
+        self._row("创建  " + datetime.fromtimestamp(st.st_ctime)
+                  .strftime("%Y-%m-%d %H:%M"), color="#607D8B", size=11)
+        self.body_layout.addStretch()
+
+    def show_image(self, path: str):
+        """图片直接显示缩略图，命中「预览」这个词的最有用场景。"""
+        self._clear()
+        self.path = path
+        self.hint.setVisible(False)
+        self.scroll.setVisible(True)
+        self.btn_refresh.setEnabled(False)
+
+        name = os.path.basename(path)
+        self.title.setText("预览 · 图片")
+
+        holder = QLabel()
+        holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pm = QPixmap(path)
+        if pm.isNull():
+            holder.setText("无法加载图片")
+            holder.setStyleSheet("color:#EF5350;font-size:12px;")
+        else:
+            # 保持比例缩到面板宽度内
+            scaled = pm.scaled(
+                210, 210,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            holder.setPixmap(scaled)
+        self.body_layout.addWidget(holder)
+
+        self._divider()
+        self._row(name, bold=True)
+        try:
+            st = os.stat(path)
+            self._row(f"{human_size(st.st_size)}", color="#607D8B", size=11)
+            self._row("  " + datetime.fromtimestamp(st.st_mtime)
+                      .strftime("%Y-%m-%d %H:%M"), color="#B0BEC5", size=10)
+        except OSError:
+            pass
+        self.body_layout.addStretch()
+
+    def refresh(self):
+        if self.path:
+            self._open_requested.emit(self.path)
+
+
 # ---------------------------------------------------------------- 导航历史
 
 class NavHistory:
@@ -439,6 +762,7 @@ class Explorer(QMainWindow):
         self.show_hidden = False
         self.show_hidden_ext = {".pyc", ".pyo", ".tmp", ".log"}
         self.view_mode = self.VIEW_ICON
+        self.preview_enabled = True
         self.sort_key = "name"
         self.sort_desc = False
         self.clipboard: list[str] = []      # 复制的源路径
@@ -549,6 +873,7 @@ class Explorer(QMainWindow):
         self.icon_list.customContextMenuRequested.connect(self.show_context_menu)
         self.icon_list.itemDoubleClicked.connect(self.on_double_click)
         self.icon_list.itemSelectionChanged.connect(self.update_status)
+        self.icon_list.itemSelectionChanged.connect(self._on_selection_preview)
         self.icon_list.setAcceptDrops(True)
         self.icon_list.installEventFilter(self)
         self.icon_list.dragEnterEvent = lambda e: self._drag_enter(e)
@@ -576,6 +901,12 @@ class Explorer(QMainWindow):
             lambda r, _: self.on_double_click(self._table_item(r)))
         self.list_table.setSortingEnabled(True)
         self.list_table.setAcceptDrops(True)
+        if self.list_table.selectionModel():
+            self.list_table.selectionModel().selectionChanged.connect(
+                self._on_selection_preview)
+        else:
+            # 排序会重建 model，延后一点再连
+            QTimer.singleShot(0, self._connect_table_selection)
         self.list_table.dragEnterEvent = lambda e: self._drag_enter(e)
         self.list_table.dropEvent = lambda e: self._drop(e)
         self.stack.addWidget(self.list_table)
@@ -594,16 +925,20 @@ class Explorer(QMainWindow):
         lay.addWidget(nav)
         lay.addWidget(crumb)
 
-        # 左侧驱动器栏 + 右侧内容区，中间可拖拽调节
+        # 三栏：驱动器栏 | 内容区 | 预览窗格，分隔条均可拖拽
         self.sidebar = self._build_sidebar()
+        self.preview = self._build_preview()
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.stack)
+        self.splitter.addWidget(self.preview)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
         self.splitter.setCollapsible(0, True)
         self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes([210, 970])
+        self.splitter.setCollapsible(2, True)
+        self.splitter.setSizes([210, 720, 250])
         self.splitter.setHandleWidth(4)
         lay.addWidget(self.splitter, 1)
 
@@ -617,6 +952,94 @@ class Explorer(QMainWindow):
 
         # 快捷键
         self._install_shortcuts()
+
+    def _build_preview(self):
+        """构建右侧预览窗格，并接上后台扫描线程。"""
+        pane = PreviewPane()
+        pane._open_requested.connect(self.navigate)
+        pane.setVisible(self.preview_enabled)
+        self._install_preview_worker(pane)
+        return pane
+
+    def _install_preview_worker(self, pane):
+        """预览扫描放后台线程，点大目录也不会卡住界面。"""
+        self.preview_worker = QThread(self)
+        self.preview_scanner = _PreviewScanner(self.show_hidden)
+        self.preview_scanner.moveToThread(self.preview_worker)
+        pane._scanner = self.preview_scanner
+        pane._thread = self.preview_worker
+        self.preview_scanner.result.connect(self._on_preview_ready)
+        self.preview_worker.start()
+
+    def request_preview(self, path: str):
+        """请求预览某个路径（文件夹看内容，文件看信息）。"""
+        pane = getattr(self, "preview", None)
+        if pane is None or not self.preview_enabled:
+            return
+        if not path:
+            pane.show_placeholder()
+            return
+        if not os.path.exists(path):
+            pane.show_placeholder("该项目已不存在")
+            return
+
+        if os.path.isdir(path):
+            # 立刻记下目标路径：后台回调会用 pane.path 做比对来丢弃过期结果，
+            # 若这里不设，show_placeholder 会把 pane.path 留在 None，
+            # 导致回调永远被当成"已切换到别处"而丢弃。
+            pane.path = path
+            pane.show_placeholder("正在读取……")
+            pane.title.setText(
+                f"预览 · {os.path.basename(path.rstrip(chr(92)) or path)}"[:30])
+            self.preview_scanner.set_show_hidden(self.show_hidden)
+            self.preview_scanner.request(path)
+        else:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in IMAGE_EXTS:
+                pane.show_image(path)
+            else:
+                pane.show_file(path)
+
+    def _on_preview_ready(self, path: str, info):
+        """后台扫描完成，回到 UI 线程渲染。"""
+        pane = getattr(self, "preview", None)
+        if pane is None or not self.preview_enabled:
+            return
+        if pane.path != path:
+            return          # 期间用户又点了别的，丢弃这次结果
+        pane.show_folder(path, info)
+
+    def _connect_table_selection(self):
+        """表格 model 被排序重建后重新挂信号。"""
+        sm = self.list_table.selectionModel()
+        if sm:
+            try:
+                sm.selectionChanged.disconnect(self._on_selection_preview)
+            except (RuntimeError, TypeError):
+                pass
+            sm.selectionChanged.connect(self._on_selection_preview)
+
+    def _on_selection_preview(self, *args):
+        """选中项变化时刷新预览面板。"""
+        if not self.preview_enabled:
+            return
+        sel = self.selected_paths()
+        if len(sel) == 1:
+            self.request_preview(sel[0])
+        elif len(sel) > 1:
+            self.preview.show_placeholder(
+                f"已选中 {len(sel)} 个项目\n仅选中单个文件夹时可预览")
+        else:
+            self.preview.show_placeholder()
+
+    def toggle_preview(self):
+        self.preview_enabled = not self.preview_enabled
+        self.preview.setVisible(self.preview_enabled)
+        if self.preview_enabled:
+            sel = self.selected_paths()
+            self.request_preview(sel[0] if sel else self.cwd)
+        else:
+            self.preview_scanner.cancel()
 
     def _build_sidebar(self):
         """左侧栏：常用目录 + 所有磁盘分区。"""
@@ -872,6 +1295,7 @@ class Explorer(QMainWindow):
         act("F9", self.toggle_sidebar)
         act("Ctrl+R", self.refresh_drives)
         act("F1", self.action_about)
+        act("F12", self.toggle_preview)
 
     # ---------------- 导航
 
@@ -912,6 +1336,10 @@ class Explorer(QMainWindow):
         self._update_nav_buttons()
         self._sync_side_selection(self.cwd)
         self.path_edit.setText(self.cwd)
+        if self.preview_enabled:
+            # 目录变了，若无选中则回到占位提示
+            if not self.selected_paths():
+                self.preview.show_placeholder()
 
     def go_back(self):
         p = self.history.back()
@@ -1047,6 +1475,7 @@ class Explorer(QMainWindow):
                 row += 1
             self.list_table.setSortingEnabled(True)
             self.list_table.sortItems(self._col_for_sort())
+            self._connect_table_selection()
 
         size_txt = f"共 {total:,} 个项目"
         if q:
@@ -1337,6 +1766,8 @@ class Explorer(QMainWindow):
         m.addSeparator()
         m.addAction("显示隐藏文件" + ("  ✓" if self.show_hidden else ""),
                     self.action_show_hidden)
+        m.addAction("预览窗格" + ("  ✓" if self.preview_enabled else ""),
+                    self.toggle_preview)
         m.addAction("属性", self.action_properties)
         m.addSeparator()
         m.addAction(f"关于 {APP_NAME}", self.action_about)
@@ -1464,6 +1895,21 @@ class Explorer(QMainWindow):
 
     def _check_empty(self):
         pass
+
+    def closeEvent(self, event):
+        """退出前停掉后台线程，否则进程不会真正结束。"""
+        try:
+            self.preview_scanner.cancel()
+            self.preview_worker.quit()
+            self.preview_worker.wait(1500)
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self.worker.quit()
+            self.worker.wait(1500)
+        except (AttributeError, RuntimeError):
+            pass
+        super().closeEvent(event)
 
     def eventFilter(self, obj, event):
         # 图标视图里按 F2 直接改名

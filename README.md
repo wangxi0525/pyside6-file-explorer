@@ -6,6 +6,8 @@
 
 ![界面](shot_icons.png)
 
+![预览窗格](shot_preview.png)
+
 ![详细信息视图](shot_detail.png)
 
 ## 环境要求
@@ -75,6 +77,18 @@ python run.py
 - 文件夹始终排在文件前面
 - `F9` 收起/展开侧栏，中间分隔条可拖拽调宽
 
+### 预览窗格
+
+选中文件夹后，右侧预览窗格显示其下级内容，不用进入就能看到里面有什么：
+
+- **文件夹**：列出下级文件夹与文件名、各自大小，并统计本层与含下级的累计项数/体积
+- **图片**：直接显示缩略图与尺寸信息（jpg/png/gif/bmp/webp/ico）
+- **其它文件**：显示类型、大小、创建与修改时间
+- 预览里的子文件夹**可直接点击进入**
+- 扫描在后台线程进行，点开大目录界面也不卡；连续点击只渲染最后一次的结果
+- 多选或未选中时显示对应提示
+- `F12` 或菜单「预览窗格」开关
+
 ### 搜索
 
 - 工具栏实时过滤当前目录，输入即筛
@@ -110,6 +124,7 @@ python run.py
 | `Ctrl+G`              | 转到    | `Ctrl+A`       | 全选           |
 | `Space`               | 切换视图  | `Alt+Enter`    | 属性           |
 | `F9`                  | 侧栏开关  | `Ctrl+R`     | 重新枚举磁盘       |
+| `F12`                 | 预览窗格  |                |              |
 | `F1`                  | 关于      |                |              |
 | `Ctrl+Shift+A`        | 隐藏文件  |                |              |
 
@@ -123,8 +138,9 @@ file_explorer/
 ├── make_icon.py     # 生成 app_icon.ico（QPainter 绘制，多尺寸 ico）
 ├── build_exe.bat    # PyInstaller 打包脚本
 ├── verify_exe.py    # 枚举窗口验证 exe 是否真的显示 GUI
+├── test_preview.py  # 预览窗格专项测试（38 项）
 ├── app_icon.ico     # 应用图标（7 种尺寸）
-├── smoke_test.py    # 74 项无界面测试
+├── smoke_test.py    # 77 项无界面测试
 └── start.bat        # 从源码启动（解释器探测与自检模式）
 ```
 
@@ -136,6 +152,8 @@ file_explorer/
 - **默认 `--onedir` 而非 `--onefile`**：onefile 的 bootloader 在部分机器上会把进程
   卡在 `PyInstaller Onefile Hidden Window`，GUI 永远不出现（实测踩过）。onedir 直接
   运行 exe，没有中间层，更可靠
+- **预览扫描在后台线程**：`moveToThread` 之后必须用 `QMetaObject.invokeMethod`
+  队列调用，**直接调用槽函数会被 Qt 拒绝**（对象不属于当前线程）
 - **驱动器枚举**用 `QStorageInfo` 而非 `os.listdir`，因为它能拿到卷标、文件系统类型和容量；卷标再用 Win32 `GetVolumeInformationW` 兜底读取
 - **图标全部代码绘制**，无外部图片依赖：文件按扩展名分 9 类配色，驱动器按磁盘/U盘/光驱/网络/主目录分别绘制
 - **后台线程**用 `QThread` + `Signal`，UI 线程只收信号刷新

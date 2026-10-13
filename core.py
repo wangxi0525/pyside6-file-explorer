@@ -496,3 +496,104 @@ def drive_icon_pixmap(d: DriveInfo, size: int = 24) -> QPixmap:
                        int(size * 0.10), int(size * 0.10))
     p.end()
     return pm
+
+# ---------------------------------------------------------------- 预览面板
+
+@dataclass
+class PreviewInfo:
+    """预览窗格的数据：一个文件夹的第一层内容。"""
+    path: str
+    dirs: list = field(default_factory=list)   # [(name, fullpath)]
+    files: list = field(default_factory=list)  # [(name, size, mtime)]
+    total_items: int = 0
+    total_size: int = 0
+    file_count: int = 0
+    dir_count: int = 0
+    error: str = ""
+    truncated: bool = False
+    # 递归估算的总文件数/总大小（只走一层子目录，用于"文件夹属性"）
+    deep_files: int = 0
+    deep_bytes: int = 0
+    deep_truncated: bool = False
+
+
+def scan_preview(path: str, show_hidden: bool = False,
+                 limit: int = 200) -> PreviewInfo:
+    """
+    扫描用于预览的目录信息。只取当前一层，最多 limit 项；
+    同时统计下级目录的累计文件数与大小（有上限，避免卡死）。
+    """
+    info = PreviewInfo(path=path)
+    if not os.path.isdir(path):
+        info.error = "不是文件夹"
+        return info
+
+    sub_dirs: list[str] = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if len(info.dirs) + len(info.files) >= limit:
+                    info.truncated = True
+                    break
+                try:
+                    if not show_hidden and is_hidden(entry.path, entry.name):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        info.dirs.append((entry.name, entry.path))
+                        sub_dirs.append(entry.path)
+                    else:
+                        st = entry.stat(follow_symlinks=False)
+                        info.files.append(
+                            (entry.name, st.st_size, st.st_mtime))
+                        info.total_size += st.st_size
+                        info.file_count += 1
+                except (OSError, PermissionError):
+                    continue
+    except PermissionError:
+        info.error = "无权限访问"
+        return info
+    except Exception as e:
+        info.error = str(e)
+        return info
+
+    info.dir_count = len(info.dirs)
+    info.total_items = info.file_count + info.dir_count
+
+    # 下一层各子目录的文件数与大小，最多下探 3 层且限定总耗时
+    budget = [8000]           # 最多累计统计 8000 个文件
+    for d in sub_dirs[:40]:  # 最多看 40 个子目录
+        if budget[0] <= 0:
+            info.deep_truncated = True
+            break
+        _count_dir(d, budget, info)
+
+    return info
+
+
+def _count_dir(path: str, budget: list, info: PreviewInfo,
+               depth: int = 0, max_depth: int = 3) -> None:
+    """递归累计文件数与大小，budget 用尽即停。"""
+    if depth > max_depth:
+        info.deep_truncated = True
+        return
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if budget[0] <= 0:
+                    info.deep_truncated = True
+                    return
+                try:
+                    if is_hidden(entry.path, entry.name):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        _count_dir(entry.path, budget, info,
+                                   depth + 1, max_depth)
+                    else:
+                        budget[0] -= 1
+                        info.deep_files += 1
+                        info.deep_bytes += entry.stat(
+                            follow_symlinks=False).st_size
+                except (OSError, PermissionError):
+                    continue
+    except (OSError, PermissionError):
+        pass
