@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QProgressBar, QPushButton, QSplitter, QStackedWidget, QStatusBar,
     QScrollArea,
+    QSizePolicy,
     QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout,
     QWidget, QAbstractItemView as AIV)
 
@@ -697,6 +698,125 @@ class NavHistory:
         return None
 
 
+class UsageBar(QWidget):
+    """极简容量条：底槽 + 填充，一眼看出用了多少。"""
+
+    def __init__(self, pct: int, parent=None):
+        super().__init__(parent)
+        self.pct = max(0, min(100, int(pct)))
+        self.setFixedHeight(5)
+        self.setStyleSheet("background:transparent;")
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        r = h / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#E3E7EA"))                  # 底槽
+        p.drawRoundedRect(0, 0, w, h, r, r)
+        if self.pct >= 90:
+            fill = QColor("#EF5350")                   # 快满了，红色警示
+        elif self.pct >= 75:
+            fill = QColor("#FFA726")
+        else:
+            fill = QColor("#42A5F5")
+        fw = max(h, int(w * self.pct / 100))
+        p.setBrush(fill)
+        p.drawRoundedRect(0, 0, fw, h, r, r)
+        p.end()
+
+
+class DriveItemWidget(QWidget):
+    """
+    侧栏里的单个分区条目：图标 + 盘符名 + 图形化容量条 + 剩余空间。
+    原来是「一行盘符 + 一行容量文字」两条列表项，现在合并成一条。
+    """
+
+    def __init__(self, d: DriveInfo, parent=None):
+        super().__init__(parent)
+        self.root = d.root
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 4, 8, 4)
+        lay.setSpacing(8)
+
+        icon = QLabel()
+        pm = drive_icon_pixmap(d)
+        if not pm.isNull():
+            icon.setPixmap(pm)
+        icon.setFixedSize(22, 22)
+        icon.setStyleSheet("background:transparent;")
+        lay.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        mid = QVBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(3)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+
+        name = QLabel(d.name)
+        name.setStyleSheet(
+            "background:transparent;color:#37474F;font-size:13px;")
+        # 空间不足时优先省略卷标，而不是把剩余空间挤掉
+        name.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Preferred)
+        top.addWidget(name, 0)
+
+        if d.label and d.label != d.name:
+            vol = QLabel(d.label)
+            vol.setStyleSheet(
+                "background:transparent;color:#90A4AE;font-size:11px;")
+            vol.setSizePolicy(QSizePolicy.Policy.Ignored,
+                              QSizePolicy.Policy.Preferred)
+            top.addWidget(vol, 1)
+        else:
+            top.addStretch(1)
+
+        if d.total > 0:
+            used_pct = int((d.total - d.free) / d.total * 100)
+            # 侧栏宽度有限，这里只放百分比；完整的剩余/总量在 tooltip 里。
+            # 容量条已经图形化了，文字不必重复占用横向空间。
+            free_t = QLabel(f"{used_pct}%")
+            free_t.setStyleSheet(
+                "background:transparent;color:#90A4AE;font-size:11px;")
+            free_t.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                 QSizePolicy.Policy.Preferred)
+            top.addWidget(free_t, 0)
+            mid.addLayout(top)
+            # 容量条铺满整行宽度，与上方文字左对齐
+            bar = UsageBar(used_pct)
+            bar.setSizePolicy(QSizePolicy.Policy.Expanding,
+                              QSizePolicy.Policy.Fixed)
+            bar_wrap = QVBoxLayout()
+            bar_wrap.setContentsMargins(1, 3, 1, 0)
+            bar_wrap.addWidget(bar)
+            mid.addLayout(bar_wrap)
+        else:
+            mid.addLayout(top)
+
+        lay.addLayout(mid, 1)
+
+        tip = d.root
+        if d.fstype:
+            tip += f"\n{d.fstype}"
+        if d.total:
+            tip += (f"\n剩余 {human_size(d.free)} / 共 {human_size(d.total)}"
+                    f"  (已用 {int((d.total - d.free) / d.total * 100)}%)")
+        self.setToolTip(tip)
+
+    def set_active(self, on: bool):
+        """选中时把主文字改为深蓝，在蓝底上更清晰。"""
+        for lab in self.findChildren(QLabel):
+            cur = lab.styleSheet()
+            if "color:#37474F" in cur:
+                lab.setStyleSheet(cur.replace(
+                    "color:#37474F",
+                    "color:#0D47A1" if on else "color:#37474F"))
+
+
 # ---------------------------------------------------------------- 主窗口
 
 def _arrow_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
@@ -1109,6 +1229,7 @@ class Explorer(QMainWindow):
         self.side_list.blockSignals(True)
         self.side_list.clear()
         self._drive_items = []
+        self._drive_widgets = []
 
         try:
             drives = list_drives()
@@ -1119,29 +1240,15 @@ class Explorer(QMainWindow):
         disks = [d for d in drives if d.kind != "home"]
 
         def add(d: DriveInfo):
-            it = QListWidgetItem(d.name)
-            it.setIcon(QIcon(drive_icon_pixmap(d)))
-            it.setData(Qt.ItemDataRole.UserRole, d.root)
-            tip = d.root
-            if d.fstype:
-                tip += f"\n{d.fstype}"
-            if d.total:
-                used = human_size(d.total - d.free)
-                tip += (f"\n已用 {used} / 共 {human_size(d.total)}"
-                        f"  ({d.free / d.total * 100:.0f}% 可用)")
-            it.setToolTip(tip)
-            self.side_list.addItem(it)
+            # 用自定义 widget 把「盘符 + 容量」合并成一条，
+            # 容量用图形条表示，不再额外占一行列表项
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, d.root)
+            widget = DriveItemWidget(d)
+            self.side_list.addItem(item)
+            self.side_list.setItemWidget(item, widget)
+            self._drive_widgets.append((item, widget))
             self._drive_items.append(d)
-            # 有容量的卷在名称后追加一行紧凑的剩余空间，扫一眼就能判断
-            if d.total > 0 and d.kind != "home":
-                used_pct = int((d.total - d.free) / d.total * 100)
-                sub = QListWidgetItem(f"    {human_size(d.free)} 可用 · {used_pct}% 已用")
-                sub.setFlags(Qt.ItemFlag.NoItemFlags)
-                f = sub.font()
-                f.setPointSizeF(max(7.0, f.pointSizeF() - 1.0))
-                sub.setFont(f)
-                sub.setForeground(QColor("#FF7043" if used_pct >= 90 else "#90A4AE"))
-                self.side_list.addItem(sub)
 
         if disks:
             # 磁盘在上、快捷位置在下：盘符是最高频的跳转入口，
@@ -1184,6 +1291,9 @@ class Explorer(QMainWindow):
                 if len(r) > best_len:
                     best_len, best = len(r), i
         self.side_list.setCurrentRow(best)
+        # 自定义 widget 不随列表项自动变色，需手动同步选中态
+        for item, widget in getattr(self, "_drive_widgets", []):
+            widget.set_active(item is self.side_list.currentItem())
 
     def _side_clicked(self, item):
         root = item.data(Qt.ItemDataRole.UserRole)

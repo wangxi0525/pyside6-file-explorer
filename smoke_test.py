@@ -240,11 +240,36 @@ def main():
           all(isinstance(f, str) for f in fstypes), str(fstypes))
     check("fstype 非空", any(fstypes), str(fstypes))
 
-    # 有容量的卷应带一行容量摘要
-    cap_rows = sum(
-        1 for i in range(w.side_list.count())
-        if "可用" in (w.side_list.item(i).text() or ""))
-    check("侧栏显示容量摘要", cap_rows >= len(disk_roots), str(cap_rows))
+    # 有容量的卷，其条目内应显示百分比（容量条已图形化，
+    # 不再单独占一行列表项，所以不能查 item().text()）
+    cap_rows = 0
+    from PySide6.QtWidgets import QLabel as _QL
+    for item, widget in getattr(w, "_drive_widgets", []):
+        texts = [lb.text() for lb in widget.findChildren(_QL)]
+        if any("%" in t for t in texts):
+            cap_rows += 1
+    check("侧栏显示容量百分比", cap_rows >= len(disk_roots), str(cap_rows))
+
+    # 每个分区应有一个图形化容量条
+    from main_window import UsageBar as _UB
+    bars = 0
+    for item, widget in getattr(w, "_drive_widgets", []):
+        bars += len(widget.findChildren(_UB))
+    check("侧栏有图形化容量条", bars >= len(disk_roots), str(bars))
+
+    # 分区条目应当合并为一条（不是盘符 + 容量两行）
+    _disc_items = []
+    for item, widget in getattr(w, "_drive_widgets", []):
+        root = item.data(Qt.ItemDataRole.UserRole)
+        if root and root.rstrip("\\/").upper() in [
+                d.rstrip("\\/").upper() for d in disk_roots]:
+            _disc_items.append(item)
+    _texts = [(it.text() or "") for it in _disc_items]
+    check("分区盘符与容量已合并为一条（无独立容量行）",
+          not any("可用" in t for t in _texts), str(_texts))
+    check("分区条目数正确",
+          len(_disc_items) == len(disk_roots),
+          f"{len(_disc_items)} vs {len(disk_roots)}")
 
     # 定位到 C 盘根目录
     win_drive = next((d for d in drives if d.kind in ("disk", "removable")), None)
