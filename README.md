@@ -4,11 +4,19 @@
 
 ![界面](shot_icons.png)
 
+![详细信息视图](shot_detail.png)
+
+## 环境要求
+
+- Python 3.10 或更高版本
+- PySide6（首次运行会自动安装）
+- Windows（macOS / Linux 可运行，删除语义略有差异）
+
 ## 快速开始
 
 双击 `start.bat`，或在终端运行：
 
-```bash
+```bat
 start.bat# 直接启动
 start.bat --check      # 自检：打印解释器路径与依赖版本，不启动界面
 start.bat D:\某个目录  # 启动后直接打开指定目录
@@ -26,8 +34,15 @@ start.bat D:\某个目录  # 启动后直接打开指定目录
 > .venv\Scripts\python.exe -m pip install PySide6
 > ```
 
-脚本内所有提示文字均为 ASCII。原因：`.bat` 默认按 GBK 解析，混有中文时会出现
+脚本内所有提示文字均为ASCII。原因：`.bat` 默认按 GBK 解析，混有中文时会出现
 `'[提示]' 不是内部或外部命令` 这类解析错误，与 `chcp` 设置无关。
+
+不想用批处理也可以直接运行：
+
+```bash
+python -m pip install PySide6
+python run.py
+```
 
 ## 功能清单
 
