@@ -757,16 +757,21 @@ class DriveItemWidget(QWidget):
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(6)
 
+        # name 形如「系统 (C:)」，label 形如「系统」——后者已包含在前者里，
+        # 直接再显示一遍就重复了。只在卷标确实是额外信息时才补充。
+        label_extra = ""
+        if d.label and d.label not in d.name:
+            label_extra = d.label
+
         name = QLabel(d.name)
         name.setStyleSheet(
             "background:transparent;color:#37474F;font-size:13px;")
-        # 空间不足时优先省略卷标，而不是把剩余空间挤掉
         name.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Preferred)
         top.addWidget(name, 0)
 
-        if d.label and d.label != d.name:
-            vol = QLabel(d.label)
+        if label_extra:
+            vol = QLabel(label_extra)
             vol.setStyleSheet(
                 "background:transparent;color:#90A4AE;font-size:11px;")
             vol.setSizePolicy(QSizePolicy.Policy.Ignored,

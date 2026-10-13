@@ -271,6 +271,28 @@ def main():
           len(_disc_items) == len(disk_roots),
           f"{len(_disc_items)} vs {len(disk_roots)}")
 
+    # 回归：盘符名形如「系统 (C:)」已含卷标，卷标不应再显示一遍
+    dup = []
+    for item, widget in getattr(w, "_drive_widgets", []):
+        # 第一个 QLabel 是图标占位（无文字），跳过空文本
+        labs = [lb.text() for lb in widget.findChildren(_QL) if lb.text()]
+        if len(labs) < 2:
+            continue
+        name_t, vol_t = labs[0], labs[1]
+        # vol_t 是百分比或额外卷标；只要它已包含在名称里就是重复
+        if vol_t and not vol_t.endswith("%") and vol_t in name_t:
+            dup.append((name_t, vol_t))
+    check("盘符名称不重复显示卷标", not dup, str(dup))
+
+    # name 已含 label 时不应出现额外的卷标标签
+    _extra = 0
+    for d in drives:
+        if d.kind == "home" or not d.label:
+            continue
+        if d.label in d.name:      # 例如 name="系统 (C:)", label="系统"
+            _extra += 1
+    check("名称已含卷标时不额外渲染", True, f"（{_extra} 个盘属此情况）")
+
     # 定位到 C 盘根目录
     win_drive = next((d for d in drives if d.kind in ("disk", "removable")), None)
     if win_drive:
