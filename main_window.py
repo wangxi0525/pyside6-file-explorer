@@ -414,6 +414,109 @@ def _small_icon(path: str, is_dir: bool, size: int = 16) -> QPixmap:
                      Qt.TransformationMode.SmoothTransformation)
 
 
+class EntryRow(QWidget):
+    """
+    预览面板里的一行：图标 + 名称 + 右侧大小。
+
+    整行都是可点区域（不只文字），悬停时整行浅蓝底，
+    单击打开——和资源管理器里点文件名直接打开的手感一致。
+    """
+
+    clicked = Signal(str)
+
+    def __init__(self, icon: QPixmap, text: str, tail: str = "",
+                 color: str = "#546E7A", size: int = 11,
+                 tooltip: str = "", path: str = "", parent=None):
+        super().__init__(parent)
+        self.path = path
+        self._hover = False
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(5)
+
+        self.ic = QLabel()
+        if not icon.isNull():
+            self.ic.setPixmap(icon)
+        self.ic.setFixedSize(16, 16)
+        self.ic.setStyleSheet("background:transparent;")
+        h.addWidget(self.ic, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.name = QLabel(text)
+        self.name.setStyleSheet(
+            f"background:transparent;color:{color};font-size:{size}px;")
+        # 过长时省略而不是撑破布局
+        self.name.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                QSizePolicy.Policy.Preferred)
+        h.addWidget(self.name, 1)
+
+        self.tail = QLabel(tail)
+        self.tail.setStyleSheet(
+            "background:transparent;color:#B0BEC5;font-size:10px;")
+        self.tail.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                QSizePolicy.Policy.Preferred)
+        self.tail.setVisible(bool(tail))
+        h.addWidget(self.tail, 0)
+
+        if tooltip:
+            self.setToolTip(tooltip)
+        if path:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    # 整行接管鼠标事件，这样文字和图标外的空白处也能点
+    def mousePressEvent(self, e):
+        if self.path:
+            self.clicked.emit(self.path)
+        super().mousePressEvent(e)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self._restyle()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self._restyle()
+        super().leaveEvent(e)
+
+    def _restyle(self):
+        bg = "#E3F2FD" if self._hover else "transparent"
+        if not self.path:
+            return
+        self.ic.setStyleSheet(f"background:{bg};")
+        self.tail.setStyleSheet(
+            f"background:{bg};color:#90A4AE;font-size:10px;")
+        # 文字颜色单独判断（选中态用深蓝，悬停保持原色加深）
+        cur = self.name.styleSheet()
+        import re
+        m = re.search(r"color:(#[0-9A-Fa-f]{6})", cur)
+        col = m.group(1) if m else "#546E7A"
+        if col not in ("#0D47A1",):          # 选中态不因悬停改变
+            self.name.setStyleSheet(
+                f"background:{bg};color:{col};font-size:{self.name.font().pointSize() or 11}px;")
+        else:
+            self.name.setStyleSheet(
+                f"background:{bg};color:{col};")
+
+    def set_active(self, on: bool):
+        """配合列表选中态切换文字颜色。"""
+        if not self.path:
+            return
+        cur = self.name.styleSheet()
+        import re
+        m = re.search(r"color:(#[0-9A-Fa-f]{6})", cur)
+        col = m.group(1) if m else "#546E7A"
+        if on:
+            col = "#0D47A1"
+        elif col == "#0D47A1":
+            col = "#546E7A"
+        bg = "#E3F2FD" if self._hover else "transparent"
+        self.name.setStyleSheet(
+            f"background:{bg};color:{col};"
+            f"font-size:{self.name.font().pointSize() or 11}px;")
+
+
 class PreviewPane(QFrame):
     """
     预览窗格：选中文件夹时在右侧显示其下级内容。
@@ -527,36 +630,21 @@ class PreviewPane(QFrame):
 
     def _entry_row(self, icon: QPixmap, text: str, tail: str = "",
                    color: str = "#546E7A", size: int = 11,
-                   indent: int = 0):
-        """预览面板里的一行：图标 + 名称 + 右侧附加信息。"""
-        h = QHBoxLayout()
-        h.setContentsMargins(indent, 1, 0, 1)
-        h.setSpacing(5)
+                   indent: int = 0, tooltip: str = "", path: str = ""):
+        """预览面板里的一行：图标 + 名称 + 右侧附加信息。整行可点。"""
+        row = EntryRow(icon, text, tail=tail, color=color, size=size,
+                       tooltip=tooltip, path=path)
+        if path:
+            row.clicked.connect(self._on_entry_clicked)
+        self.body_layout.addWidget(row)
+        return row
 
-        ic = QLabel()
-        if not icon.isNull():
-            ic.setPixmap(icon)
-        ic.setFixedSize(16, 16)
-        ic.setStyleSheet("background:transparent;")
-        h.addWidget(ic, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        name = QLabel(text)
-        name.setStyleSheet(
-            f"background:transparent;color:{color};font-size:{size}px;")
-        # 名称过长时省略而不是撑破布局
-        name.setSizePolicy(QSizePolicy.Policy.Ignored,
-                           QSizePolicy.Policy.Preferred)
-        h.addWidget(name, 1)
-
-        if tail:
-            t = QLabel(tail)
-            t.setStyleSheet(
-                "background:transparent;color:#B0BEC5;font-size:10px;")
-            t.setSizePolicy(QSizePolicy.Policy.Fixed,
-                            QSizePolicy.Policy.Preferred)
-            h.addWidget(t, 0)
-        self.body_layout.addLayout(h)
-        return name
+    def _on_entry_clicked(self, path: str):
+        """预览里点条目：文件夹进入，文件用系统默认程序打开。"""
+        if os.path.isdir(path):
+            self._open_requested.emit(path)
+        else:
+            open_in_explorer(path)
 
     def show_folder(self, path: str, info):
         """渲染文件夹预览。"""
@@ -593,14 +681,10 @@ class PreviewPane(QFrame):
         if info.dirs:
             self._row("文件夹", bold=True, color="#607D8B", size=11)
             for dname, dpath in info.dirs[:30]:
-                name_lab = self._entry_row(
-                    _small_icon(dpath, True),          # 缩略图：先画大再缩小，更清晰
-                    dname, color="#1565C0", size=12)
-                # 点名字或图标都能进入该文件夹
-                name_lab.mousePressEvent = (
-                    lambda _e, p=dpath: self._open_requested.emit(p))
-                name_lab.setCursor(Qt.CursorShape.PointingHandCursor)
-                name_lab.setToolTip(dpath)
+                self._entry_row(
+                    _small_icon(dpath, True), dname,
+                    color="#1565C0", size=12,
+                    tooltip=dpath, path=dpath)   # 点击进入该文件夹
             if len(info.dirs) > 30:
                 self._row(f"  …… 另有 {len(info.dirs) - 30} 个",
                           color="#B0BEC5", size=11)
@@ -612,13 +696,13 @@ class PreviewPane(QFrame):
             self._row("文件", bold=True, color="#607D8B", size=11)
             for fname, size, mt in info.files[:30]:
                 full = os.path.join(path, fname)
-                name_lab = self._entry_row(
-                    _small_icon(full, False),
-                    fname, tail=human_size(size), color="#546E7A", size=11)
-                if len(fname) > 18:
-                    name_lab.setToolTip(
-                        f"{full}\n{human_size(size)}  "
-                        f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}")
+                self._entry_row(
+                    _small_icon(full, False), fname,
+                    tail=human_size(size), color="#546E7A", size=11,
+                    # 点击用系统默认程序打开
+                    tooltip=f"{full}\n{human_size(size)}  "
+                            f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}",
+                    path=full)
             if len(info.files) > 30:
                 self._row(f"  …… 另有 {len(info.files) - 30} 个",
                           color="#B0BEC5", size=11)
