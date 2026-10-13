@@ -28,7 +28,7 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   send2trash, unique_name, EXT_COLOR_MAP)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.0"
+APP_VERSION = "1.01"
 
 # 预览面板里直接显示缩略图的图片格式
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico"}
