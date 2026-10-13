@@ -418,10 +418,12 @@ class EntryRow(QWidget):
     """
     预览面板里的一行：图标 + 名称 + 右侧大小。
 
-    整行都是可点区域（不只文字），悬停时整行浅蓝底，
-    单击打开——和资源管理器里点文件名直接打开的手感一致。
+    整行都是交互区域（不只文字），行为与资源管理器一致：
+    悬停显示浅蓝底，单击选中并高亮，双击才打开。
+    单击就打开在浏览时会误触——手扫过列表就弹出程序，很烦人。
     """
 
+    doubleClicked = Signal(str)
     clicked = Signal(str)
 
     def __init__(self, icon: QPixmap, text: str, tail: str = "",
@@ -430,6 +432,7 @@ class EntryRow(QWidget):
         super().__init__(parent)
         self.path = path
         self._hover = False
+        self._selected = False
 
         h = QHBoxLayout(self)
         h.setContentsMargins(4, 2, 4, 2)
@@ -464,11 +467,21 @@ class EntryRow(QWidget):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
-    # 整行接管鼠标事件，这样文字和图标外的空白处也能点
+        # 记下基础字号，重绘样式时要用
+        self._size = size
+        self._base_color = color
+
+    # 整行接管鼠标事件，这样文字和图标外的空白处也能响应
     def mousePressEvent(self, e):
         if self.path:
             self.clicked.emit(self.path)
+            self.set_selected(True)
         super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self.path:
+            self.doubleClicked.emit(self.path)
+        super().mouseDoubleClickEvent(e)
 
     def enterEvent(self, e):
         self._hover = True
@@ -480,41 +493,31 @@ class EntryRow(QWidget):
         self._restyle()
         super().leaveEvent(e)
 
+    def _bg(self) -> str:
+        if self._selected:
+            return "#BBDEFB"
+        if self._hover:
+            return "#E3F2FD"
+        return "transparent"
+
     def _restyle(self):
-        bg = "#E3F2FD" if self._hover else "transparent"
         if not self.path:
             return
+        bg = self._bg()
+        col = "#0D47A1" if self._selected else self._base_color
         self.ic.setStyleSheet(f"background:{bg};")
+        self.name.setStyleSheet(
+            f"background:{bg};color:{col};font-size:{self._size}px;")
         self.tail.setStyleSheet(
             f"background:{bg};color:#90A4AE;font-size:10px;")
-        # 文字颜色单独判断（选中态用深蓝，悬停保持原色加深）
-        cur = self.name.styleSheet()
-        import re
-        m = re.search(r"color:(#[0-9A-Fa-f]{6})", cur)
-        col = m.group(1) if m else "#546E7A"
-        if col not in ("#0D47A1",):          # 选中态不因悬停改变
-            self.name.setStyleSheet(
-                f"background:{bg};color:{col};font-size:{self.name.font().pointSize() or 11}px;")
-        else:
-            self.name.setStyleSheet(
-                f"background:{bg};color:{col};")
+
+    def set_selected(self, on: bool):
+        self._selected = on
+        self._restyle()
 
     def set_active(self, on: bool):
-        """配合列表选中态切换文字颜色。"""
-        if not self.path:
-            return
-        cur = self.name.styleSheet()
-        import re
-        m = re.search(r"color:(#[0-9A-Fa-f]{6})", cur)
-        col = m.group(1) if m else "#546E7A"
-        if on:
-            col = "#0D47A1"
-        elif col == "#0D47A1":
-            col = "#546E7A"
-        bg = "#E3F2FD" if self._hover else "transparent"
-        self.name.setStyleSheet(
-            f"background:{bg};color:{col};"
-            f"font-size:{self.name.font().pointSize() or 11}px;")
+        """兼容旧的选中联动接口。"""
+        self.set_selected(on)
 
 
 class PreviewPane(QFrame):
@@ -635,12 +638,18 @@ class PreviewPane(QFrame):
         row = EntryRow(icon, text, tail=tail, color=color, size=size,
                        tooltip=tooltip, path=path)
         if path:
-            row.clicked.connect(self._on_entry_clicked)
+            row.doubleClicked.connect(self._on_entry_double_clicked)
+            row.clicked.connect(self._on_entry_selected)
         self.body_layout.addWidget(row)
         return row
 
-    def _on_entry_clicked(self, path: str):
-        """预览里点条目：文件夹进入，文件用系统默认程序打开。"""
+    def _on_entry_selected(self, path: str):
+        """单击只选中：同组内取消其它行，保证同时只有一行高亮。"""
+        for r in self.body.findChildren(EntryRow):
+            r.set_selected(r.path == path)
+
+    def _on_entry_double_clicked(self, path: str):
+        """双击打开：目录进入，文件用系统默认程序打开。"""
         if os.path.isdir(path):
             self._open_requested.emit(path)
         else:

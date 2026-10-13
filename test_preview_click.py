@@ -28,12 +28,29 @@ def check(name, cond, extra=""):
 
 
 def click(wdg):
-    """模拟在控件上按下左键。"""
+    """模拟单击（左键按下+释放）。"""
     from PySide6.QtCore import Qt as _Qt
-    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(5, 5),
-                     _Qt.MouseButton.LeftButton, _Qt.MouseButton.LeftButton,
-                     _Qt.KeyboardModifier.NoModifier)
-    wdg.mousePressEvent(ev)
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(5, 5),
+                        _Qt.MouseButton.LeftButton, _Qt.MouseButton.LeftButton,
+                        _Qt.KeyboardModifier.NoModifier)
+    wdg.mousePressEvent(press)
+
+
+def double_click(wdg):
+    """模拟双击（press, release, doubleclick）。"""
+    from PySide6.QtCore import Qt as _Qt
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(5, 5),
+                        _Qt.MouseButton.LeftButton, _Qt.MouseButton.LeftButton,
+                        _Qt.KeyboardModifier.NoModifier)
+    release = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(5, 5),
+                          _Qt.MouseButton.LeftButton, _Qt.MouseButton.NoButton,
+                          _Qt.KeyboardModifier.NoModifier)
+    dbl = QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(5, 5),
+                      _Qt.MouseButton.LeftButton, _Qt.MouseButton.LeftButton,
+                      _Qt.KeyboardModifier.NoModifier)
+    wdg.mousePressEvent(press)
+    wdg.mouseReleaseEvent(release)
+    wdg.mouseDoubleClickEvent(dbl)
 
 
 def main():
@@ -89,26 +106,44 @@ def main():
     check("找到目录条目", len(dir_rows) == 1, str(len(dir_rows)))
     check("找到文件条目", len(file_rows) == 1, str(len(file_rows)))
 
-    # 文件点击 -> 调open_in_explorer
+    # 单击文件 -> 只选中，不打开（避免误触）
     if file_rows:
         click(file_rows[0])
         app.processEvents()
-        check("点击文件触发系统打开", opened == [f1],
-              f"opened={opened}")
+        check("单击文件不触发打开", opened == [], f"opened={opened}")
+        check("单击后该行高亮选中", file_rows[0]._selected)
+        if len(file_rows) > 1:
+            click(file_rows[1])
+            app.processEvents()
+            check("改选其它行时原行取消选中",
+                  not file_rows[0]._selected and file_rows[1]._selected)
+            click(file_rows[0])
 
-    # 目录点击 -> 导航（预览里显示的是「子目录」的下一级，
-    # 即「更深一层」，不是 sub 本身）
+    # 单击目录 -> 只选中，不导航
     if dir_rows:
         click(dir_rows[0])
         app.processEvents()
-        check("点击目录触发导航", dir_rows[0].path in navigated,
+        check("单击目录不触发导航", navigated == [], f"navigated={navigated}")
+
+    # 双击文件 -> 调open_in_explorer
+    if file_rows:
+        double_click(file_rows[0])
+        app.processEvents()
+        check("双击文件触发系统打开", opened == [f1],
+              f"opened={opened}")
+
+    # 双击目录 -> 导航（预览里显示的是「子目录」的下一级，
+    # 即「更深一层」，不是 sub 本身）
+    if dir_rows:
+        double_click(dir_rows[0])
+        app.processEvents()
+        check("双击目录触发导航", dir_rows[0].path in navigated,
               f"期望 {dir_rows[0].path}，实际 {navigated}")
 
-    # 悬停样式
+    # 悬停样式（先取消选中，避免与选中蓝混淆）
     if file_rows:
         r = file_rows[0]
-        from PySide6.QtCore import QEvent as QE
-        from PySide6.QtGui import QEnterEvent
+        r.set_selected(False)
         r.enterEvent(None)
         app.processEvents()
         bg_hover = "E3F2FD" in r.name.styleSheet()
@@ -118,6 +153,15 @@ def main():
         check("移开后恢复透明",
               "transparent" in r.name.styleSheet(),
               r.name.styleSheet()[:60])
+
+    # 选中态应比悬停更深
+    if file_rows:
+        r = file_rows[0]
+        r.set_selected(True)
+        app.processEvents()
+        check("选中时高亮更深", "BBDEFB" in r.name.styleSheet(),
+              r.name.styleSheet()[:60])
+        r.set_selected(False)
 
     # tooltip
     if file_rows:
