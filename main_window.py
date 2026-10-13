@@ -1146,13 +1146,15 @@ class Explorer(QMainWindow):
                 sub.setForeground(QColor("#FF7043" if used_pct >= 90 else "#90A4AE"))
                 self.side_list.addItem(sub)
 
-        if homes:
-            head = self._side_header("位置")
-            for d in homes:
-                add(d)
         if disks:
-            head = self._side_header("此电脑")
+            # 磁盘在上、快捷位置在下：盘符是最高频的跳转入口，
+            # 放最上面一伸手就能点到
+            self._side_header("此电脑")
             for d in disks:
+                add(d)
+        if homes:
+            self._side_header("位置")
+            for d in homes:
                 add(d)
 
         self.side_list.blockSignals(False)
