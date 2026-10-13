@@ -401,6 +401,19 @@ class _PreviewScanner(QObject):
 
 # ---------------------------------------------------------------- 预览面板
 
+def _small_icon(path: str, is_dir: bool, size: int = 16) -> QPixmap:
+    """
+    预览面板用的小图标。先按 4 倍尺寸绘制再平滑缩下来，
+    直接按目标尺寸画会丢失细节（尤其文件图标里的色块和折角）。
+    """
+    pm = icon_for(path, is_dir, size * 4).pixmap(size * 4, size * 4)
+    if pm.isNull():
+        return pm
+    return pm.scaled(size, size,
+                     Qt.AspectRatioMode.KeepAspectRatio,
+                     Qt.TransformationMode.SmoothTransformation)
+
+
 class PreviewPane(QFrame):
     """
     预览窗格：选中文件夹时在右侧显示其下级内容。
@@ -512,6 +525,39 @@ class PreviewPane(QFrame):
         line.setStyleSheet("background:#E8E8E8;border:none;")
         self.body_layout.addWidget(line)
 
+    def _entry_row(self, icon: QPixmap, text: str, tail: str = "",
+                   color: str = "#546E7A", size: int = 11,
+                   indent: int = 0):
+        """预览面板里的一行：图标 + 名称 + 右侧附加信息。"""
+        h = QHBoxLayout()
+        h.setContentsMargins(indent, 1, 0, 1)
+        h.setSpacing(5)
+
+        ic = QLabel()
+        if not icon.isNull():
+            ic.setPixmap(icon)
+        ic.setFixedSize(16, 16)
+        ic.setStyleSheet("background:transparent;")
+        h.addWidget(ic, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        name = QLabel(text)
+        name.setStyleSheet(
+            f"background:transparent;color:{color};font-size:{size}px;")
+        # 名称过长时省略而不是撑破布局
+        name.setSizePolicy(QSizePolicy.Policy.Ignored,
+                           QSizePolicy.Policy.Preferred)
+        h.addWidget(name, 1)
+
+        if tail:
+            t = QLabel(tail)
+            t.setStyleSheet(
+                "background:transparent;color:#B0BEC5;font-size:10px;")
+            t.setSizePolicy(QSizePolicy.Policy.Fixed,
+                            QSizePolicy.Policy.Preferred)
+            h.addWidget(t, 0)
+        self.body_layout.addLayout(h)
+        return name
+
     def show_folder(self, path: str, info):
         """渲染文件夹预览。"""
         self._clear()
@@ -547,17 +593,14 @@ class PreviewPane(QFrame):
         if info.dirs:
             self._row("文件夹", bold=True, color="#607D8B", size=11)
             for dname, dpath in info.dirs[:30]:
-                item = QLabel(f"  {dname}")
-                item.setStyleSheet(
-                    "background:transparent;color:#1565C0;font-size:12px;"
-                    "padding:1px 0;")
-                # 只在名字被截断或超长时才提示完整路径，
-                # 否则鼠标扫过一整列会连续弹 tooltip，很吵
-                if len(dname) > 16 or len(dname) * 12 > self.width() - 60:
-                    item.setToolTip(dname)
-                item.mousePressEvent = (
+                name_lab = self._entry_row(
+                    _small_icon(dpath, True),          # 缩略图：先画大再缩小，更清晰
+                    dname, color="#1565C0", size=12)
+                # 点名字或图标都能进入该文件夹
+                name_lab.mousePressEvent = (
                     lambda _e, p=dpath: self._open_requested.emit(p))
-                self.body_layout.addWidget(item)
+                name_lab.setCursor(Qt.CursorShape.PointingHandCursor)
+                name_lab.setToolTip(dpath)
             if len(info.dirs) > 30:
                 self._row(f"  …… 另有 {len(info.dirs) - 30} 个",
                           color="#B0BEC5", size=11)
@@ -568,16 +611,14 @@ class PreviewPane(QFrame):
                 self._divider()
             self._row("文件", bold=True, color="#607D8B", size=11)
             for fname, size, mt in info.files[:30]:
-                row = QLabel(f"  {fname}    {human_size(size)}")
-                row.setStyleSheet(
-                    "background:transparent;color:#546E7A;font-size:11px;"
-                    "padding:1px 0;")
-                # 名称够短就不用 tooltip，避免刷屏
-                if len(fname) > 18 or len(fname) * 11 > self.width() - 90:
-                    row.setToolTip(
-                        f"{fname}\n{human_size(size)}  "
+                full = os.path.join(path, fname)
+                name_lab = self._entry_row(
+                    _small_icon(full, False),
+                    fname, tail=human_size(size), color="#546E7A", size=11)
+                if len(fname) > 18:
+                    name_lab.setToolTip(
+                        f"{full}\n{human_size(size)}  "
                         f"{datetime.fromtimestamp(mt):%Y-%m-%d %H:%M}")
-                self.body_layout.addWidget(row)
             if len(info.files) > 30:
                 self._row(f"  …… 另有 {len(info.files) - 30} 个",
                           color="#B0BEC5", size=11)

@@ -149,6 +149,14 @@ def main():
         blob2 = " ".join(t for t in pane_texts if t)
         check("预览里含下级内容", "子目录" in blob2, blob2[:120])
 
+        # 条目前应有小图标（QLabel 带 pixmap）
+        from PySide6.QtWidgets import QLabel as _QL2
+        icons = 0
+        for lb in w.preview.body.findChildren(_QL2):
+            if lb.pixmap() is not None and not lb.pixmap().isNull():
+                icons += 1
+        check("预览条目带图标", icons >= 2, f"找到 {icons} 个图标")
+
     # 选中文件
     w.icon_list.clearSelection()
     file_row = next(
