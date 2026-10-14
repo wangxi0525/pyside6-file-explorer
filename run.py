@@ -17,18 +17,44 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
-# 兜底隐藏控制台：从源码用 python.exe 启动时（而非 pythonw.exe），
-# Windows 会附带一个控制台窗口。这里用 FreeConsole 把它摘掉，
-# 打包 exe 时本就不会有控制台，这段只在源码运行时起作用。
-if os.name == "nt" and not getattr(sys, "frozen", False):
+# ---------------------------------------------------------------------------
+# 抑制启动瞬间的控制台黑框
+#
+# 两种来源：
+#   1) 用 python.exe 跑源码（或双击 start.bat 由 cmd 拉起 python.exe）时，
+#      Windows 会给进程配一个控制台窗口 —— 就是用户看到的"一闪而过的小窗"。
+#   2) 打包成 exe（--windowed）时本就没有控制台，这里就是空操作。
+#
+# 关键点：必须先 ShowWindow(SW_HIDE) 立刻把窗口藏起来。
+# 只调 FreeConsole 是不够的 —— 从 start.bat 启动时控制台被 cmd.exe 和
+# python.exe 共享，GetConsoleProcessList 返回 2，此时 FreeConsole 不能调
+#（会影响父进程），结果窗口一直留在屏幕上。
+# ---------------------------------------------------------------------------
+def _suppress_console():
+    if os.name != "nt":
+        return
     try:
         import ctypes
-        kernel32 = ctypes.windll.kernel32
-        # 先判断自己是否独占控制台，独占才摘，避免影响父进程
-        if kernel32.GetConsoleProcessList(None, 0) == 1:
-            kernel32.FreeConsole()
+        k32 = ctypes.windll.kernel32
+        u32 = ctypes.windll.user32
+        hwnd = k32.GetConsoleWindow()
+        if hwnd:
+            u32.ShowWindow(hwnd, 0)          # SW_HIDE：立刻不可见
+        try:
+            n = k32.GetConsoleProcessList(None, 0)
+        except Exception:
+            n = 0
+        # 只有独占控制台（自己就是那个窗口的主人）时才彻底摘掉它，
+        # 避免把调用方的终端一起关掉。
+        if n == 1 and not getattr(sys, "frozen", False):
+            k32.FreeConsole()
     except Exception:
         pass
+
+
+_suppress_console()
+
+import ctypes  # noqa: E402,F401  （供 enable_dpi_awareness 等后续使用）
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon

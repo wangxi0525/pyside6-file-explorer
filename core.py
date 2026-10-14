@@ -309,14 +309,13 @@ def open_terminal(path: str) -> None:
     """在当前目录开一个命令行窗口。"""
     if os.name == "nt":
         cmd = os.environ.get("COMSPEC", "cmd.exe")
-        # 这里要显示新窗口，所以**不能**用 CREATE_NO_WINDOW
-        #（它会让 start 失效）。但仍要设 SW_HIDE 把中间的 shell 藏掉，
-        # 否则双击后先闪一下黑框再弹出目标窗口。
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        si.wShowWindow = subprocess.SW_HIDE
-        subprocess.Popen(f'start "cmd" /d "{path}" {cmd}', shell=True,
-                         startupinfo=si)
+        # 直接用 CREATE_NEW_CONSOLE 起 cmd，并把它自己的工作目录设成目标目录。
+        # 早先写成 shell=True + start "cmd" /d ...，会先拉起一个中间 cmd.exe
+        #（用户看到的就是闪一下的黑框）再去开目标窗口。开新控制台只有一个
+        # 窗口，没有中间层。
+        subprocess.Popen(
+            [cmd], cwd=path,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10))
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-a", "Terminal", path])
     else:

@@ -51,6 +51,9 @@ dist/
 # 打包时的备用产物目录（dist 被占用时的兜底输出）
 dist_new/
 build_new/
+dist_build/
+dist_pack/
+build_pack/
 
 # 打包过程中生成的临时文件
 *.log

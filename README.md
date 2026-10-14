@@ -2,13 +2,29 @@
 
 一个用 Qt（PySide6）实现的桌面文件管理器，功能对齐 Windows 资源管理器。
 
-**当前版本：1.01**
+**当前版本：1.2**
 
 ![界面](shot_icons.png)
 
 ![预览窗格](shot_preview.png)
 
 ![详细信息视图](shot_detail.png)
+
+## 更新日志
+
+### 1.2
+- **修复**：启动时不再闪现小空窗口（预览窗格在无父对象时被 `setVisible`，
+  变成了一个独立顶层窗口）
+- **修复**：单击文件夹不再连闪小黑窗（`EntryRow` 里的标签无父构造就设可见性，
+  预览一次铺 30 行就闪 30 次）
+- **修复**：夜间模式下界面"花屏"——顶栏、面包屑、侧栏、预览面板标题条、
+  空目录页当初写死了浅色内联样式，切换主题时没有跟着刷新
+- 切换主题时不再逐个重建 tooltip 窗口（批量抑制）
+- 新增 `test_no_stray_window.py` 回归测试，防止游离顶层小窗问题复发
+
+### 1.01
+- 新增夜间主题，太阳/月亮按钮一键切换
+- 修复预览小黑框、盘符文字裁剪，新增收藏夹与分组折叠
 
 ## 环境要求
 
@@ -36,14 +52,16 @@
 双击 `start.bat`，或在终端运行：
 
 ```bat
-start.bat# 直接启动（会保留控制台窗口）
+start.bat              # 静默启动（默认不弹任何控制台窗口）
+start.bat --console    # 带控制台启动，用于看报错
 start.bat --check      # 自检：打印解释器路径与依赖版本，不启动界面
 start.bat D:\某个目录  # 启动后直接打开指定目录
 ```
 
-`start.bat` 会自动挑选可用的 Python（依次尝试项目内 `.venv`、WorkBuddy 托管环境、
-托管环境的版本目录、系统安装的 Python、`py.exe` 启动器、`PATH`），并按需安装 PySide6。
-依赖已就绪时不会重复安装。
+`start.bat` 默认把程序交给 `pythonw.exe` 后台拉起，cmd 窗口一闪即退，
+全程没有控制台。`start.bat` 会自动挑选可用的 Python（依次尝试项目内 `.venv`、
+WorkBuddy 托管环境、托管环境的版本目录、系统安装的 Python、`py.exe` 启动器、
+`PATH`），并按需安装 PySide6。依赖已就绪时不会重复安装。
 
 > 如果希望完全独立于 WorkBuddy，可以自己建一个环境再双击 `start.bat`，它会优先使用
 > 同目录下的 `.venv`：
@@ -159,6 +177,7 @@ file_explorer/
 ├── make_icon.py     # 生成 app_icon.ico（QPainter 绘制，多尺寸 ico）
 ├── build_exe.bat    # PyInstaller 打包脚本
 ├── verify_exe.py    # 枚举窗口验证 exe 是否真的显示 GUI
+├── test_no_stray_window.py # 回归测试：不得弹出游离的顶层小窗
 ├── test_preview.py  # 预览窗格专项测试（41 项）
 ├── test_sidebar_toggle.py  # 侧栏收起/恢复测试（19 项）
 ├── test_single_instance.py  # 单实例保护验证
@@ -187,6 +206,20 @@ file_explorer/
 - **矢量按钮图标**用 `QPainter` 画线条，避免 `←` `⟳` 等字符在缺字字体下变方块
 - **侧栏容量条**同样是 `QPainter` 画的（`UsageBar`）：圆角底槽 + 圆角填充，
   按占用率变色（<75% 蓝、≥75% 橙、≥90% 红），只占 5px 高
+- **无父对象的 QWidget 就是独立顶层窗口**——这是本项目踩过两次的同一个坑，
+  务必记住：
+  1. `_build_preview()` 曾在 `PreviewPane` 还没入 `splitter` 时就
+     `setVisible(True)`，启动瞬间闪出一个约 214x138 的小空窗；
+  2. `EntryRow.__init__` 里 `self.tail = QLabel()` 无父构造，紧接着
+     `setVisible(True)`，于是每一行预览都弹一个顶层小窗。预览面板一次最多
+     铺 30 行，所以「单击文件夹」时会连闪 30 个 136x50 的小黑窗。
+
+  **正确做法**：控件要么构造时就传父对象（`QLabel(text, self)`），要么等
+  `addWidget()` 之后再设可见性。`test_no_stray_window.py` 是这两处 bug 的
+  回归测试，会捕获任何「无父对象却被显示的小顶层窗口」，不要删。
+- **批量 tooltip 抑制**：预览重绘会一次性给几十个条目 `setToolTip`，若鼠标
+  恰好悬停其上，Qt 会为每个条目重建 tooltip 窗口。`EntryRow` 用
+  `begin_tip_batch()/end_tip_batch()` 把整批压住，结束再一次性落地
 
 ## 运行测试
 

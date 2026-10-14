@@ -58,7 +58,7 @@ if errorlevel 1 (
   )
 )
 
-REM ================= launch =================
+REM ================= self check =================
 if /i "%~1"=="--check" (
   echo Interpreter: %PY%
   "%PY%" --version
@@ -68,12 +68,33 @@ if /i "%~1"=="--check" (
   exit /b 0
 )
 
-REM --run keeps the console silent and hands off to pythonw.exe, so no
-REM command window is left behind once the GUI appears.
-if /i "%~1"=="--run" goto :launch_silent
+REM ================= launch =================
+REM Default is SILENT: hand off to pythonw.exe via `start`, so the cmd
+REM window that runs this script closes immediately and the GUI comes up
+REM with no console at all. Running `"%PY%" run.py` directly (the old
+REM behaviour) left a black console window on screen - that flash is the
+REM main thing users complained about.
+REM
+REM Pass --console to keep the window open for debugging.
 
-echo [RUN] Starting Qt File Explorer...
+set "PYW="
+for %%I in ("%PY%") do set "PYDIR=%%~dpI"
+if exist "%PYDIR%pythonw.exe" set "PYW=%PYDIR%pythonw.exe"
+
+if /i "%~1"=="--console" goto :launch_console
+
+:launch_silent
+if defined PYW (
+  start "" "%PYW%" run.py %*
+) else (
+  start "" "%PY%" run.py %*
+)
+exit /b 0
+
+:launch_console
+echo [RUN] Starting Qt File Explorer (console mode)...
 echo.
+shift
 "%PY%" run.py %*
 if errorlevel 1 (
   echo.
@@ -81,21 +102,6 @@ if errorlevel 1 (
   echo.
   pause
   exit /b 1
-)
-exit /b 0
-
-:launch_silent
-shift
-REM Prefer pythonw.exe: it has no console attached at all, so nothing
-REM is left on screen. Fall back to python.exe if pythonw is missing.
-set "PYW="
-for %%I in ("%PY%") do set "PYDIR=%%~dpI"
-if exist "%PYDIR%pythonw.exe" set "PYW=%PYDIR%pythonw.exe"
-
-if defined PYW (
-  start "" "%PYW%" run.py %*
-) else (
-  start "" "%PY%" run.py %*
 )
 exit /b 0
 

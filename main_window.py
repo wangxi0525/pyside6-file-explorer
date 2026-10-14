@@ -21,8 +21,8 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QSplitter, QStackedWidget, QStatusBar,
     QScrollArea,
     QSizePolicy,
-    QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QVBoxLayout,
-    QWidget, QAbstractItemView as AIV)
+    QTableWidget, QTableWidgetItem, QToolBar, QToolButton, QToolTip,
+    QVBoxLayout, QWidget, QAbstractItemView as AIV)
 
 from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   human_size, icon_for, is_hidden, kind_of, list_drives,
@@ -32,7 +32,7 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.01"
+APP_VERSION = "1.2"
 
 
 # ---------------------------------------------------------------- 主题
@@ -543,6 +543,21 @@ class EntryRow(QWidget):
     doubleClicked = Signal(str)
     clicked = Signal(str)
 
+    # -- 批量 tooltip 抑制 --------------------------------------------------
+    # 预览重绘时会一次性给几十个条目 setToolTip。如果鼠标正好悬在某个条目
+    # 上，Qt 会认为"提示内容变了"，于是把 tooltip 窗口重建一次 —— 每个条目
+    # 一个，屏幕上一连串 136x50 的小黑窗一闪而过（用户反馈的"小黑窗"）。
+    # 批量改动期间先压住，整批结束后只生效一次。
+    _tip_batch = 0
+
+    @classmethod
+    def begin_tip_batch(cls):
+        cls._tip_batch += 1
+
+    @classmethod
+    def end_tip_batch(cls):
+        cls._tip_batch = max(0, cls._tip_batch - 1)
+
     def __init__(self, icon: QPixmap, text: str, tail: str = "",
                  color: str = "#546E7A", size: int = 11,
                  tooltip: str = "", path: str = "", is_dir: bool = False,
@@ -559,14 +574,19 @@ class EntryRow(QWidget):
         h.setContentsMargins(4, 2, 4, 2)
         h.setSpacing(5)
 
-        self.ic = QLabel()
+        # 注意：三个 QLabel 必须显式以 self 为父对象。
+        # 无参 QLabel() 是一个【没有父对象的顶层窗口】，此时只要调用
+        # setVisible(True) 或在真正布局前被 show()，屏幕上就会闪出一个
+        # 独立小窗 —— 这正是"点文件夹时闪小黑窗"的根源（预览面板一次
+        # 最多铺 30 行，于是连闪 30 次）。父对象在构造时给，永绝后患。
+        self.ic = QLabel(self)
         if not icon.isNull():
             self.ic.setPixmap(icon)
         self.ic.setFixedSize(16, 16)
         self.ic.setStyleSheet("background:transparent;")
         h.addWidget(self.ic, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self.name = QLabel(text)
+        self.name = QLabel(text, self)
         self.name.setStyleSheet(
             f"background:transparent;color:{color};font-size:{size}px;")
         # 过长时省略而不是撑破布局
@@ -574,13 +594,14 @@ class EntryRow(QWidget):
                                 QSizePolicy.Policy.Preferred)
         h.addWidget(self.name, 1)
 
-        self.tail = QLabel(tail)
+        self.tail = QLabel(tail, self)
         self.tail.setStyleSheet(
             "background:transparent;color:#B0BEC5;font-size:10px;")
         self.tail.setSizePolicy(QSizePolicy.Policy.Fixed,
                                 QSizePolicy.Policy.Preferred)
-        self.tail.setVisible(bool(tail))
         h.addWidget(self.tail, 0)
+        # 有了父对象（且已入布局）之后，再决定它看不看得见
+        self.tail.setVisible(bool(tail))
 
         if path:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -647,16 +668,26 @@ class EntryRow(QWidget):
         self._loading = loading
         if loading:
             self._tip = ""
-            self.setToolTip("")
+            if not EntryRow._tip_batch:
+                self.setToolTip("")
         else:
             tip = getattr(self, "_pending_tip", "")
-            self.setToolTip(tip)
+            # 批量期间不逐个下发：每次 setToolTip 都可能让 Qt 重建
+            # tooltip 窗口，鼠标悬停时就是那串一闪而过的小黑窗。
+            if not EntryRow._tip_batch:
+                self.setToolTip(tip)
 
     def set_tooltip(self, tip: str):
         """记录完整 tooltip；若仍在加载态则等加载完再生效。"""
         self._pending_tip = tip
-        if not getattr(self, "_loading", False):
+        if not getattr(self, "_loading", False) and not EntryRow._tip_batch:
             self.setToolTip(tip)
+
+    def flush_tooltip(self):
+        """批量结束后把挂起的 tooltip 一次落地。"""
+        if getattr(self, "_loading", False):
+            return
+        self.setToolTip(getattr(self, "_pending_tip", ""))
 
     def apply_theme(self, c: dict):
         """按主题重刷配色（内联样式优先级高于全局 qss，必须逐个设置）。"""
@@ -700,6 +731,8 @@ class PreviewPane(QFrame):
         head.setFixedHeight(32)
         head.setStyleSheet(
             "QFrame{background:#FFFFFF;border-bottom:1px solid #EEEEEE;}")
+        self._head_frame = head          # 主题切换时要重刷（夜间模式下这里
+                                         # 若保持白底，预览面板就会"花"）
         hl = QHBoxLayout(head)
         hl.setContentsMargins(12, 4, 6, 4)
         self.title = QLabel("预览")
@@ -747,11 +780,20 @@ class PreviewPane(QFrame):
         self._c = c
         self.setStyleSheet(
             f"QFrame{{background:{c['bg']};border-left:1px solid {c['grid']};}}")
+        # 标题条 / 滚动区 / 内容体的底色当初写死了浅色，不重刷的话
+        # 夜间模式下预览面板会出现"上半截白、下半截黑"的花屏效果
+        self._head_frame.setStyleSheet(
+            "QFrame{background:%s;border-bottom:1px solid %s;}"
+            % (c["bg"], c["grid"]))
+        self.scroll.setStyleSheet("background:%s;" % c["bg"])
+        self.body.setStyleSheet("background:%s;" % c["bg"])
         self.title.setStyleSheet(
             f"background:transparent;color:{c['dim']};font-size:11px;")
         self.hint.setStyleSheet(
             f"color:{c['muted']};background:{c['bg']};font-size:12px;"
             f"padding:0 14px;border:1px dashed {c['border2']};border-radius:6px;")
+        # 刷新按钮的线条图标按新主题重画（原色 #78909C 在深底上偏暗）
+        self.btn_goto.setIcon(QIcon(_arrow_pixmap("refresh", 15, c["dim"])))
         for r in self.body.findChildren(EntryRow):
             r.apply_theme(c)
 
@@ -766,6 +808,9 @@ class PreviewPane(QFrame):
 
     # ---- 渲染 ----
     def _clear(self):
+        # 先把可能正挂着的 tooltip 收掉：下一步会删掉鼠标底下的控件，
+        # 控件一没，Qt 会把气泡窗口跟着销毁/重建，表现为闪一下。
+        QToolTip.hideText()
         while self.body_layout.count():
             it = self.body_layout.takeAt(0)
             w = it.widget()
@@ -809,10 +854,20 @@ class PreviewPane(QFrame):
         """
         整组条目渲染完毕，统一解除加载态并补上 tooltip。
 
-        这样在扫描->渲染这段窗口期内不会有 tooltip 弹出。
+        批量期间先用 begin/end_tip_batch 压住 tooltip 下发：否则鼠标
+        恰好悬在某个条目上时，几十次 setToolTip 会让 Qt 反复重建 tooltip
+        窗口，屏幕上就是一串一闪而过的小黑窗。整批结束后只落地一次。
         """
+        EntryRow.begin_tip_batch()
+        try:
+            rows = self.body.findChildren(EntryRow)
+            for r in rows:
+                r.set_loading(False)
+        finally:
+            EntryRow.end_tip_batch()
+        # 整批结束，一次性生效
         for r in self.body.findChildren(EntryRow):
-            r.set_loading(False)
+            r.flush_tooltip()
 
     def _on_entry_selected(self, path: str):
         """单击只选中：同组内取消其它行，保证同时只有一行高亮。"""
@@ -1309,6 +1364,7 @@ class Explorer(QMainWindow):
         nav = QFrame()
         nav.setFixedHeight(56)
         nav.setStyleSheet("QFrame{background:#FAFAFA;border-bottom:1px solid #E0E0E0;}")
+        self._nav_frame = nav            # 主题切换时要重刷
         nl = QHBoxLayout(nav)
         nl.setContentsMargins(10, 8, 10, 8)
         nl.setSpacing(6)
@@ -1373,6 +1429,7 @@ class Explorer(QMainWindow):
         crumb = QFrame()
         crumb.setFixedHeight(32)
         crumb.setStyleSheet("QFrame{background:#FFFFFF;border-bottom:1px solid #EEEEEE;}")
+        self._crumb_frame = crumb        # 主题切换时要重刷
         cl = QHBoxLayout(crumb)
         cl.setContentsMargins(12, 3, 12, 3)
         self.crumb_layout = QHBoxLayout()
@@ -1467,6 +1524,8 @@ class Explorer(QMainWindow):
         self.splitter.setCollapsible(2, True)
         self.splitter.setSizes([210, 720, 250])
         self.splitter.setHandleWidth(4)
+        # 现在有了父对象，再设可见性就不会弹出游离的顶层小窗了
+        self.preview.setVisible(self.preview_enabled)
         lay.addWidget(self.splitter, 1)
 
         pl = QVBoxLayout()
@@ -1483,10 +1542,17 @@ class Explorer(QMainWindow):
         self._install_shortcuts()
 
     def _build_preview(self):
-        """构建右侧预览窗格，并接上后台扫描线程。"""
+        """
+        构建右侧预览窗格，并接上后台扫描线程。
+
+        注意：绝不能在 pane 还没有父对象时就 setVisible(True)。
+        没有父对象的 widget 是一个独立顶层窗口，此刻显示它会在屏幕上
+        弹出一个 ~200x100 的小空窗（标题栏只挂着应用名），直到它被
+        塞进 splitter 才"归位"——这就是启动时"一闪而过的小空窗口"。
+        可见性挪到 addWidget 之后再设。
+        """
         pane = PreviewPane()
         pane._open_requested.connect(self.navigate)
-        pane.setVisible(self.preview_enabled)
         self._install_preview_worker(pane)
         return pane
 
@@ -1593,6 +1659,8 @@ class Explorer(QMainWindow):
         panel.setMinimumWidth(150)
         panel.setStyleSheet(
             "QFrame#sidebar{background:#FAFAFA;border-right:1px solid #E0E0E0;}")
+        self._sidebar_frame = panel      # 主题切换时要重刷（否则列表底部
+                                         # 露出的面板空隙在夜间模式下是白条）
 
         v = QVBoxLayout(panel)
         v.setContentsMargins(0, 8, 0, 8)
@@ -1836,8 +1904,36 @@ class Explorer(QMainWindow):
         c = THEMES[self.theme]
         self._c = c
         self.setStyleSheet(build_qss(c))
+        self._apply_tooltip_style(c)
         self._refresh_theme_icon()
         self._repaint_widgets_for_theme()
+
+    def _apply_tooltip_style(self, c: dict):
+        """
+        让悬浮提示气泡跟随主题。
+
+        tooltip 是独立的顶层窗口，不是主窗口的子控件，所以
+        self.setStyleSheet(build_qss(...)) 里的 QToolTip 规则对它完全不生效
+        —— 那行一直是死代码。结果气泡沿用系统原生配色，在深色环境下
+        显示为一个小黑块，看起来就像"点一下就闪出来的小黑窗口"。
+        只有应用级样式表 / 调色板才能管到它，这里两者都设一遍。
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            app.setStyleSheet(
+                "QToolTip{background:%s;color:%s;border:1px solid %s;"
+                "padding:4px 6px;}" % (c["bg"], c["fg"], c["border2"]))
+        except Exception:
+            pass
+        try:
+            pal = app.palette()
+            pal.setColor(pal.ColorRole.ToolTipBase, QColor(c["bg"]))
+            pal.setColor(pal.ColorRole.ToolTipText, QColor(c["fg"]))
+            app.setPalette(pal)
+        except Exception:
+            pass
 
     def toggle_theme(self):
         """在浅色 / 夜间之间切换，并持久化选择。"""
@@ -1868,6 +1964,35 @@ class Explorer(QMainWindow):
                 "QListWidget::item:hover{background:%s;}"
                 "QListWidget::item:selected{background:%s;color:%s;}"
                 % (c["bg"], c["hover"], c["accent_bg"], c["sel_fg"]))
+        except Exception:
+            pass
+        # 顶栏 / 面包屑条 / 状态标签 / 空目录页当初写死了浅色内联样式，
+        # 不重刷的话夜间模式下这些区域仍是白底 —— 界面看起来"花的"
+        try:
+            self._nav_frame.setStyleSheet(
+                "QFrame{background:%s;border-bottom:1px solid %s;}"
+                % (c["alt_bg"], c["border2"]))
+            self._crumb_frame.setStyleSheet(
+                "QFrame{background:%s;border-bottom:1px solid %s;}"
+                % (c["bg"], c["grid"]))
+            self._sidebar_frame.setStyleSheet(
+                "QFrame#sidebar{background:%s;border-right:1px solid %s;}"
+                % (c["alt_bg"], c["grid"]))
+            self.status_label.setStyleSheet(
+                f"color:{c['dim']};font-size:12px;")
+            self._empty_widget.setStyleSheet(
+                f"QWidget{{background:{c['bg']};}}")
+            for lab in self._empty_widget.findChildren(QLabel):
+                txt = lab.text()
+                if txt == "此文件夹为空":
+                    lab.setStyleSheet(f"font-size:16px;color:{c['dim']};")
+                elif txt.startswith("把文件拖进来"):
+                    lab.setStyleSheet(f"font-size:12px;color:{c['muted']};")
+        except Exception:
+            pass
+        # 面包屑按钮是动态生成的，直接按当前路径重建一次最省事
+        try:
+            self._update_crumbs()
         except Exception:
             pass
         self._refresh_side_headers()
@@ -1913,18 +2038,21 @@ class Explorer(QMainWindow):
 
     def _empty_page(self):
         page = QWidget()
-        page.setStyleSheet("QWidget{background:#FFFFFF;}")
+        # 底色/文字色跟主题走，_apply_theme 时会重刷（否则夜间模式下
+        # 空目录页仍是刺眼的白底）
+        c = getattr(self, "_c", THEMES["light"])
+        page.setStyleSheet(f"QWidget{{background:{c['bg']};}}")
         l = QVBoxLayout(page)
         l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         big = QLabel("🗂")
         big.setStyleSheet("font-size:56px;background:transparent;")
         l.addWidget(big)
         t = QLabel("此文件夹为空")
-        t.setStyleSheet("font-size:16px;color:#78909C;")
+        t.setStyleSheet(f"font-size:16px;color:{c['dim']};")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         l.addWidget(t)
         s = QLabel("把文件拖进来，或用「新建文件夹」开始")
-        s.setStyleSheet("font-size:12px;color:#B0BEC5;")
+        s.setStyleSheet(f"font-size:12px;color:{c['muted']};")
         s.setAlignment(Qt.AlignmentFlag.AlignCenter)
         l.addWidget(s)
         self._empty_widget = page
@@ -2054,9 +2182,13 @@ class Explorer(QMainWindow):
 
         parts = self.cwd.replace("/", "\\").split("\\")
         acc = ""
-        style_ok = ("QPushButton{border:none;background:transparent;color:#546E7A;"
-                    "padding:3px 5px;border-radius:4px;}"
-                    "QPushButton:hover{background:#E3F2FD;color:#1565C0;}")
+        # 面包屑配色跟主题走（写死浅色的话，夜间模式下这一条会花掉）
+        c = getattr(self, "_c", THEMES["light"])
+        style_ok = (f"QPushButton{{border:none;background:transparent;"
+                    f"color:{c['file_fg']};"
+                    f"padding:3px 5px;border-radius:4px;}}"
+                    f"QPushButton:hover{{background:{c['hover']};"
+                    f"color:{c['accent']};}}")
         if self.cwd.startswith("\\\\"):
             parts = [""] + [p for p in parts if p]
         for i, part in enumerate(parts):
@@ -2073,7 +2205,7 @@ class Explorer(QMainWindow):
             self.crumb_layout.addWidget(b)
             if i < len(parts) - 1:
                 sep = QLabel("\\")
-                sep.setStyleSheet("color:#CFD8DC;")
+                sep.setStyleSheet(f"color:{c['faint']};")
                 self.crumb_layout.addWidget(sep)
         self.crumb_layout.addStretch()
 
@@ -2103,6 +2235,10 @@ class Explorer(QMainWindow):
         return dirs, files
 
     def _render(self, res: DirScan):
+        # 重绘会把鼠标底下的条目一起销毁，连同它的悬浮气泡。
+        # 不先收掉的话，气泡会在点击/切目录的瞬间闪一下（小窗口），
+        # 在深色环境下就是一个突兀的小黑块。
+        QToolTip.hideText()
         q = self.search.text().strip().lower()
         dirs, files = self._sorted(res)
         if q:
@@ -2123,13 +2259,14 @@ class Explorer(QMainWindow):
                 it = QListWidgetItem(icon_for(path, True, 48), name)
                 it.setData(Qt.ItemDataRole.UserRole, path)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-                it.setToolTip(path)
+                # 不再给每个条目挂 tooltip：文件区是最常被鼠标扫过的地方，
+                # 气泡一弹一收就是用户看到的那种"小窗口"。路径在地址栏、
+                # 预览窗格和状态栏都能看到，这里不必再重复。
                 self.icon_list.addItem(it)
             for name, path, size, mt in files:
                 it = QListWidgetItem(icon_for(path, False, 48), name)
                 it.setData(Qt.ItemDataRole.UserRole, path)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-                it.setToolTip(f"{path}\n{human_size(size)}")
                 self.icon_list.addItem(it)
         else:
             self.list_table.setSortingEnabled(False)
@@ -2164,7 +2301,6 @@ class Explorer(QMainWindow):
     def _fill_row(self, row, name, path, size, kind, mtime, is_dir):
         icon = QTableWidgetItem(icon_for(path, is_dir, 32), name)
         icon.setData(Qt.ItemDataRole.UserRole, path)
-        icon.setToolTip(path)
         icon.setFlags(icon.flags() | Qt.ItemFlag.ItemIsEditable)
         self.list_table.setItem(row, 0, icon)
         size_item = QTableWidgetItem("" if is_dir else human_size(size))
