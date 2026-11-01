@@ -128,14 +128,59 @@ def main():
     check("手动拖过分隔条后停止自动", w._preview_manual is True)
     w._preview_manual = False
 
-    # 拖拽：内部拖动带 url 且带内部标记
-    from main_window import INTERNAL_MIME
-    from PySide6.QtCore import QMimeData, QUrl
+    # 拖拽：真的模拟一次鼠标拖动，确认事件过滤器挂在 viewport 上生效
+    import main_window as mw
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QPoint, QPointF, QEvent, QMimeData, QUrl
+
+    dragged = []
+    class _FakeDrag:
+        def __init__(self, parent):
+            self.md = None
+        def setMimeData(self, md):
+            self.md = md
+            dragged.append(md)
+        def exec(self, *a, **k):
+            return Qt.DropAction.MoveAction
+
+    w.navigate(tmp)
+    w.set_view(w.VIEW_DETAIL)
+    app.processEvents()
+    tbl = w.list_table
+    row = next(r for r in range(tbl.rowCount())
+               if tbl.item(r, 0).text() == "子目录")
+    rect = tbl.visualItemRect(tbl.item(row, 0))
+    vp = tbl.viewport()
+
+    def _fire(pos, etype, buttons):
+        ev = QMouseEvent(
+            etype, QPointF(pos), QPointF(vp.mapToGlobal(pos)),
+            Qt.MouseButton.LeftButton if etype == QEvent.Type.MouseButtonPress
+            else Qt.MouseButton.NoButton,
+            buttons, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(vp, ev)
+
+    _orig_drag = mw.QDrag
+    mw.QDrag = _FakeDrag
+    try:
+        w._press_pos = None
+        _fire(rect.center(), QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton)
+        check("按下时记录拖拽起点", w._press_pos is not None)
+        _fire(rect.center() + QPoint(30, 0), QEvent.Type.MouseMove,
+              Qt.MouseButton.LeftButton)
+    finally:
+        mw.QDrag = _orig_drag
+    # 这条专门防「过滤器装在控件上、鼠标事件却发给 viewport」那个坑
+    check("拖动超阈值会发起拖拽（过滤器在 viewport 上）", len(dragged) == 1,
+          len(dragged))
+    if dragged:
+        check("拖拽 mimeData 含文件 URL", dragged[0].hasUrls())
+        check("拖拽 mimeData 带内部标记", dragged[0].hasFormat(mw.INTERNAL_MIME))
+
     md = QMimeData()
-    md.setUrls([QUrl.fromLocalFile(os.path.join(tmp, "a.txt"))])
-    md.setData(INTERNAL_MIME, b"1")
-    check("内部拖拽携带文件 URL", md.hasUrls())
-    check("内部拖拽带内部标记", md.hasFormat(INTERNAL_MIME))
+    md.setUrls([QUrl.fromLocalFile(os.path.join(tmp, "说明.md"))])
+    md.setData(mw.INTERNAL_MIME, b"1")
+    check("内部拖拽可构造", md.hasUrls() and md.hasFormat(mw.INTERNAL_MIME))
 
     # 排序
     w.sort_key, w.sort_desc = "size", True

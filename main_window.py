@@ -1789,6 +1789,7 @@ class Explorer(QMainWindow):
         self.icon_list.itemSelectionChanged.connect(self._on_selection_preview)
         self.icon_list.setAcceptDrops(True)
         self.icon_list.installEventFilter(self)
+        self.icon_list.viewport().installEventFilter(self)
         self.icon_list.dragEnterEvent = lambda e: self._drag_enter(e)
         self.icon_list.dropEvent = lambda e: self._drop(e)
         self.stack.addWidget(self.icon_list)
@@ -1824,6 +1825,7 @@ class Explorer(QMainWindow):
         self.list_table.dropEvent = lambda e: self._drop(e)
         # 拖出靠 eventFilter 里的手动 QDrag（见 _begin_drag）
         self.list_table.installEventFilter(self)
+        self.list_table.viewport().installEventFilter(self)
         self.stack.addWidget(self.list_table)
 
         # 级联视图（Miller 列）
@@ -3236,9 +3238,15 @@ class Explorer(QMainWindow):
                 return True
 
         # 图标/列表视图：自己发起拖拽。
-        # QTableWidget 的模型是私有的，拿不到带文件 URL 的 mimeData，
-        # 内建拖拽只能在表格内部挪行，拖到别的程序或文件夹上都没反应。
-        if obj is self.icon_list or obj is self.list_table:
+        # 注意鼠标事件是发给 viewport 的，不是发给 QListWidget/QTableWidget
+        # 本身——过滤器只装在控件上会一个 MouseMove 都收不到，拖动永远不触发。
+        # QTableWidget 的模型又是私有的，内建拖拽拿不到带文件 URL 的 mimeData。
+        view = None
+        if obj is self.icon_list or obj is self.icon_list.viewport():
+            view = self.icon_list
+        elif obj is self.list_table or obj is self.list_table.viewport():
+            view = self.list_table
+        if view is not None:
             t = event.type()
             if t == event.Type.MouseButtonPress \
                     and event.button() == Qt.MouseButton.LeftButton:
@@ -3250,7 +3258,7 @@ class Explorer(QMainWindow):
                             ).manhattanLength() >= QApplication.startDragDistance():
                         pos = self._press_pos
                         self._press_pos = None
-                        self._begin_drag(obj, pos)
+                        self._begin_drag(view, pos)
             elif t == event.Type.MouseButtonRelease:
                 self._press_pos = None
         return super().eventFilter(obj, event)
