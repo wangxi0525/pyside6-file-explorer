@@ -110,23 +110,52 @@ def main():
         check("重复点同一项不叠加列", len(w.cascade._cols) == 2,
               len(w.cascade._cols))
 
-    # 预览窗格按名称长度自适应
-    w.navigate(tmp)
+    # 预览窗格：宽度按当前列表条目名的 90% 覆盖来定
     w.set_view(w.VIEW_LIST)
+    w.navigate(tmp)
     app.processEvents()
     w._preview_manual = False
-    w._fit_preview_width(os.path.join(tmp, "a.txt"))
+    w._fit_preview_width()
     app.processEvents()
     narrow = w.splitter.sizes()[2]
-    w._fit_preview_width(os.path.join(tmp, "很长" * 20 + ".txt"))
+
+    long_file = os.path.join(tmp, "很长的文件名" * 6 + ".txt")
+    with open(long_file, "w", encoding="utf-8") as f:
+        f.write("x")
+    w.navigate(tmp)
     app.processEvents()
     wide = w.splitter.sizes()[2]
-    check("预览宽度随名称变宽", wide > narrow, f"{narrow} -> {wide}")
+    os.remove(long_file)
+
+    check("列表名变长 → 预览窗格变宽", wide > narrow, f"{narrow} -> {wide}")
     check("预览宽度下限 220", narrow >= 220, narrow)
     check("预览宽度上限 520", wide <= 520, wide)
     w._on_splitter_moved(0, 1)
     check("手动拖过分隔条后停止自动", w._preview_manual is True)
     w._preview_manual = False
+
+    # 预览开关按钮（右下角）
+    check("存在右下角预览开关", getattr(w, "preview_toggle", None) is not None)
+    was = w.preview_enabled
+    w.toggle_preview()
+    check("点开关能收起预览", w.preview_enabled != was)
+    w.toggle_preview()
+    check("再点能展开预览", w.preview_enabled == was)
+
+    # 级联列宽按名字长度自适应
+    from main_window import CascadeView, _cover_width
+    from PySide6.QtGui import QFontMetrics
+    w.navigate(tmp)
+    w.set_view(w.VIEW_CASCADE)
+    app.processEvents()
+    col_w = w.cascade._boxes[0].width()
+    check("级联列宽不小于下限", col_w >= CascadeView.COL_MIN, col_w)
+    check("级联列宽不大于上限", col_w <= CascadeView.COL_MAX, col_w)
+    _col = w.cascade._cols[0]
+    _names = [_col.item(i).text() for i in range(_col.count())]
+    _expect = _cover_width(QFontMetrics(_col.font()), _names, 0.9) + CascadeView.COL_PAD
+    _expect = max(CascadeView.COL_MIN, min(CascadeView.COL_MAX, _expect))
+    check("列宽＝名字 90% 分位宽度 + 内边距", col_w == _expect, f"{col_w} vs {_expect}")
 
     # 拖拽：真的模拟一次鼠标拖动，确认事件过滤器挂在 viewport 上生效
     import main_window as mw

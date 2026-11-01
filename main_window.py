@@ -33,7 +33,7 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # 内部拖拽的标记：带这个格式说明是窗口内自己拖自己，
 # 落到文件夹上应当"移动"，而从别的程序拖进来仍然是"复制"。
@@ -1321,12 +1321,33 @@ def _view_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
         # 三列由左至右逐级缩进，表示 Miller 列视图的级联展开
         for cx, top in ((2, 2), (8, 4), (14, 6)):
             p.drawRect(cx, top, 3, size - top - 2)
+    elif kind in ("eye", "eye_off"):
+        # 预览开关：睁眼 / 加一道斜杠表示已关闭
+        p.drawEllipse(QRectF(2, 4.5, size - 4, size - 9))
+        p.drawEllipse(QRectF(size / 2 - 2.2, size / 2 - 2.2, 4.4, 4.4))
+        if kind == "eye_off":
+            p.drawLine(3, size - 4, size - 3, 4)
     else:  # rows：带分隔线
         for i in range(3):
             y = 4 + i * 5
             p.drawLine(3, y + 1, size - 3, y + 1)
     p.end()
     return pm
+
+
+def _cover_width(fm: QFontMetrics, names, cover: float = 0.9) -> int:
+    """
+    返回"能盖住 cover 比例条目名"的宽度（像素）。
+
+    取排序后的第 cover 分位而不是最大值：目录里常有一两个超长文件名，
+    按最大值定宽会让整列都是空气。盖住 90% 就够了，剩下几个显示省略号，
+    完整名字在悬停提示和预览窗格里都能看到。
+    """
+    ws = sorted(fm.horizontalAdvance(n) for n in names if n)
+    if not ws:
+        return 0
+    idx = max(0, min(len(ws) - 1, int(len(ws) * cover + 0.999) - 1))
+    return ws[idx]
 
 
 class CascadeView(QWidget):
@@ -1342,7 +1363,10 @@ class CascadeView(QWidget):
     分列的展示、选中和拖放。
     """
 
-    COL_WIDTH = 232
+    COL_MIN = 150            # 列宽下限
+    COL_MAX = 430            # 列宽上限
+    COL_PAD = 46             # 图标 + 左右内边距 + 竖向滚动条
+    COVER = 0.9              # 列宽要能容下 90% 的条目名
 
     path_changed = Signal(str)        # 最右列目录发生变化
     selection_changed = Signal(str)   # 选中项变化（空串表示没有选中）
@@ -1388,7 +1412,6 @@ class CascadeView(QWidget):
         """返回 (列容器, 列表控件)。容器带一条显示目录名的列头。"""
         box = QFrame()
         box.setObjectName("cascadeBox")
-        box.setFixedWidth(self.COL_WIDTH)
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
@@ -1406,6 +1429,7 @@ class CascadeView(QWidget):
             QAbstractItemView.SelectionMode.ExtendedSelection)
         lst.setUniformItemSizes(True)
         lst.setIconSize(QSize(18, 18))
+        lst.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lst.customContextMenuRequested.connect(
             lambda pos, c=lst: self._on_context_menu(c, pos))
@@ -1415,6 +1439,10 @@ class CascadeView(QWidget):
         lst.installEventFilter(self)
         v.addWidget(lst, 1)
         self._fill(lst, path)
+        # 列宽按本列条目的名字长度定，不看别的列
+        names = [lst.item(i).text() for i in range(lst.count())]
+        width = _cover_width(QFontMetrics(lst.font()), names, self.COVER) + self.COL_PAD
+        box.setFixedWidth(max(self.COL_MIN, min(self.COL_MAX, width)))
         if lst.count() == 0:
             # 空列不标一下，整片白会让人以为是没加载出来
             head.setText(head.text() + "（空）")
@@ -1540,6 +1568,14 @@ class CascadeView(QWidget):
             return
         idx = self._active if 0 <= self._active < len(self._cols) else len(self._cols) - 1
         self._cols[idx].selectAll()
+
+    def active_names(self) -> list[str]:
+        """当前活动列里所有条目的名字，用于估算预览窗格该多宽。"""
+        if not self._cols:
+            return []
+        idx = self._active if 0 <= self._active < len(self._cols) else len(self._cols) - 1
+        col = self._cols[idx]
+        return [col.item(i).text() for i in range(col.count())]
 
     def item_count(self) -> int:
         if not self._cols:
@@ -1877,6 +1913,14 @@ class Explorer(QMainWindow):
         lay.addLayout(pl)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
+
+        # 预览开关：浮在右下角。预览窗格关掉之后这个按钮仍然留着，
+        # 否则用户把窗格收了就找不到地方再打开（只剩 F12 和右键菜单）。
+        self.preview_toggle = QToolButton(central)
+        self.preview_toggle.setFixedSize(28, 28)
+        self.preview_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.preview_toggle.clicked.connect(self.toggle_preview)
+        self._sync_preview_toggle()
         # 恢复上次选的主题（默认浅色）
         self.theme = load_theme()
         self.apply_light_theme()
@@ -1995,17 +2039,37 @@ class Explorer(QMainWindow):
         if index == 1:                  # 0=侧栏|内容，1=内容|预览
             self._preview_manual = True
 
-    def _fit_preview_width(self, path: str) -> None:
-        """让预览窗格宽度跟着文件名/文件夹名的长度走，限制在 220~520px。"""
+    def _current_names(self) -> list[str]:
+        """当前列表里显示的条目名，按视图分别取。"""
+        if self.view_mode == self.VIEW_CASCADE:
+            return self.cascade.active_names()
+        if self.view_mode == self.VIEW_ICON:
+            return [self.icon_list.item(i).text()
+                    for i in range(self.icon_list.count())]
+        out = []
+        for r in range(self.list_table.rowCount()):
+            it = self.list_table.item(r, 0)
+            if it is not None:
+                out.append(it.text())
+        return out
+
+    def _fit_preview_width(self, path: str = "") -> None:
+        """
+        预览窗格宽度按当前列表条目名的 90% 覆盖来定，限制 220~520px。
+
+        以整个列表为准、而不是只看选中项：选中项一会儿长一会儿短，
+        跟着它调会让分隔条左右乱跳。90% 之外的超长名字在预览里换行显示。
+        """
         if not self.preview_enabled or self._preview_manual:
             return
         if not hasattr(self, "splitter"):
             return
-        name = os.path.basename(path.rstrip("\\/")) or path
         fm = QFontMetrics(self.preview.font())
-        # 名称宽度 + 左侧图标与内边距；预览里还有大小/类型等行，稍放宽一点
-        need = fm.horizontalAdvance(name) + 56
-        want = max(220, min(520, need))
+        need = _cover_width(fm, self._current_names(), 0.9)
+        if not need and path:
+            need = fm.horizontalAdvance(os.path.basename(path.rstrip("\\/")))
+        # 名称宽度 + 图标与内边距
+        want = max(220, min(520, need + 56))
         sizes = self.splitter.sizes()
         if len(sizes) != 3:
             return
@@ -2018,11 +2082,44 @@ class Explorer(QMainWindow):
     def toggle_preview(self):
         self.preview_enabled = not self.preview_enabled
         self.preview.setVisible(self.preview_enabled)
+        self._sync_preview_toggle()
         if self.preview_enabled:
             sel = self.selected_paths()
             self.request_preview(sel[0] if sel else self.cwd, force=True)
         else:
             self.preview_scanner.cancel()
+
+    def _sync_preview_toggle(self):
+        """右下角预览开关的图标、提示和配色，随主题与开关状态刷新。"""
+        btn = getattr(self, "preview_toggle", None)
+        if btn is None:
+            return
+        c = getattr(self, "_c", THEMES["light"])
+        on = self.preview_enabled
+        btn.setIcon(QIcon(_view_pixmap("eye" if on else "eye_off", 16, c["dim"])))
+        btn.setToolTip("隐藏预览窗格 (F12)" if on else "显示预览窗格 (F12)")
+        btn.setStyleSheet(
+            f"QToolButton{{background:{c['alt_bg']};"
+            f"border:1px solid {c['border2']};border-radius:14px;}}"
+            f"QToolButton:hover{{background:{c['hover']};"
+            f"border-color:{c['accent2']};}}")
+        btn.raise_()
+        self._place_preview_toggle()
+
+    def _place_preview_toggle(self):
+        btn = getattr(self, "preview_toggle", None)
+        cw = self.centralWidget()
+        if btn is None or cw is None:
+            return
+        bottom = 16
+        if getattr(self, "progress", None) is not None and self.progress.isVisible():
+            bottom += self.progress.height() + 8
+        btn.move(cw.width() - btn.width() - 16, cw.height() - btn.height() - bottom)
+        btn.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_preview_toggle()
 
     def _build_sidebar(self):
         """左侧栏：常用目录 + 所有磁盘分区。"""
@@ -2284,6 +2381,7 @@ class Explorer(QMainWindow):
         except AttributeError:
             pass
         self._sync_view_buttons()
+        self._sync_preview_toggle()
 
     def _apply_tooltip_style(self, c: dict):
         """
@@ -2520,6 +2618,8 @@ class Explorer(QMainWindow):
             # 目录变了，若无选中则回到占位提示
             if not self.selected_paths():
                 self.preview.show_placeholder()
+            # 条目换了，预览宽度要按新列表重算
+            self._fit_preview_width()
 
     def go_back(self):
         p = self.history.back()
