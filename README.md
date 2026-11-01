@@ -10,6 +10,10 @@
 
 ![详细信息视图](shot_detail.png)
 
+![级联视图](shot_cascade.png)
+
+![级联视图（夜间）](shot_cascade_dark.png)
+
 ## 更新日志
 
 ### 1.3
