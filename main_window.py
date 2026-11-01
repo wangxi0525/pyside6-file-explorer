@@ -2813,6 +2813,10 @@ class Explorer(QMainWindow):
 
     def set_view(self, mode: int):
         self.view_mode = mode
+        # 级联视图横着要摆好几列，预览窗格默认收起，把宽度让给列表。
+        # 用户进来后仍可点右下角按钮或按 F12 手动打开。
+        if mode == self.VIEW_CASCADE and self.preview_enabled:
+            self.toggle_preview()
         self._sync_view_buttons()
 
         self.list_table.setColumnHidden(1, mode != self.VIEW_DETAIL)

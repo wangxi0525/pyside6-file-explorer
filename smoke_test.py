@@ -82,6 +82,8 @@ def main():
     w.set_view(w.VIEW_CASCADE)
     app.processEvents()
     check("级联是第 4 种视图", w.VIEW_CASCADE == 3)
+    check("切到级联时预览窗格默认关闭", w.preview_enabled is False,
+          w.preview_enabled)
     check("工具栏有 4 个视图按钮", len(w._view_btns) == 4, len(w._view_btns))
     check("切到级联后显示级联控件", w.stack.currentWidget() is w.cascade)
     check("级联初始只有一列", len(w.cascade._cols) == 1, len(w.cascade._cols))
@@ -112,6 +114,8 @@ def main():
 
     # 预览窗格：宽度按当前列表条目名的 90% 覆盖来定
     w.set_view(w.VIEW_LIST)
+    if not w.preview_enabled:          # 上一步切级联时被自动关了
+        w.toggle_preview()
     w.navigate(tmp)
     app.processEvents()
     w._preview_manual = False
