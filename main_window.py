@@ -10,9 +10,10 @@ from datetime import datetime
 from PySide6.QtCore import (Qt, QDir, QSize, QTimer, QStandardPaths,
                             QPropertyAnimation, QEasingCurve, Signal,
                             QThread, QObject, QMetaObject, Q_ARG, Slot,
-                            QRectF)
+                            QRectF, QUrl, QMimeData, QEvent, QPoint)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices,
-                           QDragEnterEvent, QDropEvent, QGuiApplication,
+                           QDrag, QDragEnterEvent, QDropEvent, QFontMetrics,
+                           QGuiApplication,
                            QKeySequence, QIcon, QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -32,7 +33,11 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
+
+# 内部拖拽的标记：带这个格式说明是窗口内自己拖自己，
+# 落到文件夹上应当"移动"，而从别的程序拖进来仍然是"复制"。
+INTERNAL_MIME = "application/x-qt-explorer-items"
 
 
 # ---------------------------------------------------------------- 主题
@@ -1295,7 +1300,7 @@ def _arrow_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
 
 
 def _view_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
-    """三种视图模式的矢量小图标。"""
+    """四种视图模式的矢量小图标。"""
     pm = QPixmap(size, size)
     pm.fill(QColor(0, 0, 0, 0))
     p = QPainter(pm)
@@ -1312,6 +1317,10 @@ def _view_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
             y = 4 + i * 4
             p.drawRect(3, y, 2, 2)
             p.drawLine(7, y + 1, size - 3, y + 1)
+    elif kind == "cascade":
+        # 三列由左至右逐级缩进，表示 Miller 列视图的级联展开
+        for cx, top in ((2, 2), (8, 4), (14, 6)):
+            p.drawRect(cx, top, 3, size - top - 2)
     else:  # rows：带分隔线
         for i in range(3):
             y = 4 + i * 5
@@ -1320,8 +1329,325 @@ def _view_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
     return pm
 
 
+class CascadeView(QWidget):
+    """
+    Miller 列（级联）视图。
+
+    第一列是当前目录，点其中的文件夹会在右侧展开一列显示它的内容，
+    可以一直向右点下去；点某一列里的另一个文件夹，会先砍掉它右边的列
+    再展开——这是这类视图的常规行为。最右列对应的目录就是"当前目录"，
+    地址栏、面包屑、预览都会跟着它走。
+
+    右键菜单、复制粘贴等动作仍由 Explorer 统一处理，本类只负责
+    分列的展示、选中和拖放。
+    """
+
+    COL_WIDTH = 232
+
+    path_changed = Signal(str)        # 最右列目录发生变化
+    selection_changed = Signal(str)   # 选中项变化（空串表示没有选中）
+    open_file = Signal(str)           # 双击文件交给外部打开
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cols: list[QListWidget] = []
+        self._boxes: list[QWidget] = []     # 每列的容器（列头 + 列表）
+        self._paths: list[str] = []
+        self._active = -1
+        self._c = THEMES["light"]
+        self.show_hidden = False
+        self.context_menu_handler = None   # Explorer 注入：fn(pos)
+        self.move_handler = None           # Explorer 注入：fn(sources, dest)
+        self._press_pos: QPoint | None = None
+        self._press_col: QListWidget | None = None
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self._inner = QWidget()
+        self._row = QHBoxLayout(self._inner)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(0)
+        self._row.addStretch(1)
+        self._scroll.setWidget(self._inner)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._scroll)
+        self.apply_theme(self._c)
+
+    # ---------------- 列
+
+    def _make_col(self, path: str):
+        """返回 (列容器, 列表控件)。容器带一条显示目录名的列头。"""
+        box = QFrame()
+        box.setObjectName("cascadeBox")
+        box.setFixedWidth(self.COL_WIDTH)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        head = QLabel(os.path.basename(path.rstrip("\\/")) or path)
+        head.setObjectName("cascadeHead")
+        head.setFixedHeight(26)
+        head.setToolTip(path)
+        v.addWidget(head)
+
+        lst = QListWidget()
+        lst.setObjectName("cascadeCol")
+        lst.setFrameShape(QFrame.Shape.NoFrame)
+        lst.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        lst.setUniformItemSizes(True)
+        lst.setIconSize(QSize(18, 18))
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lst.customContextMenuRequested.connect(
+            lambda pos, c=lst: self._on_context_menu(c, pos))
+        lst.itemClicked.connect(lambda it, c=lst: self._on_click(c, it))
+        lst.itemDoubleClicked.connect(lambda it, c=lst: self._on_double_click(c, it))
+        lst.setAcceptDrops(True)
+        lst.installEventFilter(self)
+        v.addWidget(lst, 1)
+        self._fill(lst, path)
+        if lst.count() == 0:
+            # 空列不标一下，整片白会让人以为是没加载出来
+            head.setText(head.text() + "（空）")
+        return box, lst
+
+    def _fill(self, lst: QListWidget, path: str) -> None:
+        lst.clear()
+        res = scan_dir(path, show_hidden=self.show_hidden)
+        if res.error:
+            return
+        for name, p in sorted(res.dirs, key=lambda d: d[0].lower()):
+            it = QListWidgetItem(icon_for(p, True, 18), name)
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            it.setData(Qt.ItemDataRole.UserRole + 1, True)
+            lst.addItem(it)
+        for name, p, _size, _mt in sorted(res.files, key=lambda f: f[0].lower()):
+            it = QListWidgetItem(icon_for(p, False, 18), name)
+            it.setData(Qt.ItemDataRole.UserRole, p)
+            it.setData(Qt.ItemDataRole.UserRole + 1, False)
+            lst.addItem(it)
+
+    def load(self, path: str) -> None:
+        """重置成只有一列的初始状态。"""
+        self._truncate(0)
+        box, lst = self._make_col(path)
+        self._row.insertWidget(0, box)
+        self._boxes.append(box)
+        self._cols.append(lst)
+        self._paths.append(path)
+        self._active = 0
+        QTimer.singleShot(0, self._scroll_to_end)
+
+    def reload(self) -> None:
+        """原地重扫所有列（刷新/删除/新建后用），保留展开层级。"""
+        for i, (col, path) in enumerate(zip(self._cols, self._paths)):
+            sel = [it.data(Qt.ItemDataRole.UserRole) for it in col.selectedItems()]
+            self._fill(col, path)
+            for r in range(col.count()):
+                if col.item(r).data(Qt.ItemDataRole.UserRole) in sel:
+                    col.item(r).setSelected(True)
+
+    def _truncate(self, n: int) -> None:
+        while len(self._cols) > n:
+            self._cols.pop()
+            self._paths.pop()
+            if self._boxes:
+                box = self._boxes.pop()
+                self._row.removeWidget(box)
+                box.setParent(None)
+                box.deleteLater()
+        if self._active >= len(self._cols):
+            self._active = len(self._cols) - 1
+
+    def _expand(self, idx: int, path: str) -> None:
+        if idx + 1 < len(self._cols) and self._paths[idx + 1] == path:
+            return                      # 这一层已经展开了，不必重建
+        self._truncate(idx + 1)
+        box, lst = self._make_col(path)
+        self._row.insertWidget(len(self._cols), box)
+        self._boxes.append(box)
+        self._cols.append(lst)
+        self._paths.append(path)
+        self._active = idx + 1
+        self.path_changed.emit(path)
+        self.selection_changed.emit(path)   # 预览跟着显示这个文件夹
+        QTimer.singleShot(0, self._scroll_to_end)
+
+    def _scroll_to_end(self) -> None:
+        bar = self._scroll.horizontalScrollBar()
+        bar.setValue(bar.maximum())
+
+    # ---------------- 交互
+
+    def _on_click(self, col: QListWidget, item: QListWidgetItem) -> None:
+        idx = self._cols.index(col) if col in self._cols else -1
+        self._active = idx
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        # 真实点击时 Qt 已经处理了选中；这里兜一下，保证以代码方式
+        # 触发（测试、键盘导航）时选中态也对得上
+        if not item.isSelected():
+            col.clearSelection()
+            item.setSelected(True)
+        if item.data(Qt.ItemDataRole.UserRole + 1):
+            self._expand(idx, path)
+        else:
+            self.selection_changed.emit(path)
+
+    def _on_double_click(self, col: QListWidget, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and not item.data(Qt.ItemDataRole.UserRole + 1):
+            self.open_file.emit(path)
+
+    def _on_context_menu(self, col: QListWidget, pos) -> None:
+        if self.context_menu_handler:
+            # 让 Explorer 知道是哪一列被右键，才能找对"当前目录"
+            self._active = self._cols.index(col) if col in self._cols else self._active
+            self.context_menu_handler(col.mapToGlobal(pos))
+
+    # ---------------- 对外查询
+
+    def active_path(self) -> str:
+        if not self._cols:
+            return ""
+        idx = self._active if 0 <= self._active < len(self._paths) else len(self._paths) - 1
+        return self._paths[idx]
+
+    def selected_paths(self) -> list[str]:
+        if not self._cols:
+            return []
+        idx = self._active if 0 <= self._active < len(self._cols) else len(self._cols) - 1
+        col = self._cols[idx]
+        out = []
+        for it in col.selectedItems():
+            p = it.data(Qt.ItemDataRole.UserRole)
+            if p:
+                out.append(p)
+        return out
+
+    def select_all(self) -> None:
+        if not self._cols:
+            return
+        idx = self._active if 0 <= self._active < len(self._cols) else len(self._cols) - 1
+        self._cols[idx].selectAll()
+
+    def item_count(self) -> int:
+        if not self._cols:
+            return 0
+        idx = self._active if 0 <= self._active < len(self._cols) else len(self._cols) - 1
+        return self._cols[idx].count()
+
+    def clear_selection(self) -> None:
+        for col in self._cols:
+            col.clearSelection()
+
+    # ---------------- 拖放
+
+    def eventFilter(self, obj, ev):
+        if not isinstance(obj, QListWidget) or obj not in self._cols:
+            return super().eventFilter(obj, ev)
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress:
+            self._press_pos = ev.position().toPoint()
+            self._press_col = obj
+        elif t == QEvent.Type.MouseMove:
+            if self._press_pos is not None and (ev.buttons() & Qt.MouseButton.LeftButton):
+                if (ev.position().toPoint() - self._press_pos).manhattanLength() \
+                        >= QApplication.startDragDistance():
+                    self._begin_drag(obj, self._press_pos)
+                    self._press_pos = None
+        elif t == QEvent.Type.MouseButtonRelease:
+            self._press_pos = None
+        elif t == QEvent.Type.DragEnter:
+            if ev.mimeData().hasUrls():
+                ev.acceptProposedAction()
+                return True
+        elif t == QEvent.Type.DragMove:
+            if ev.mimeData().hasUrls():
+                ev.acceptProposedAction()
+                return True
+        elif t == QEvent.Type.Drop:
+            if ev.mimeData().hasUrls():
+                self._handle_drop(obj, ev)
+                return True
+        return super().eventFilter(obj, ev)
+
+    def _begin_drag(self, col: QListWidget, pos: QPoint) -> None:
+        idx = col.indexAt(pos)
+        if not idx.isValid():
+            return
+        item = col.item(idx.row())
+        if item is None:
+            return
+        if not item.isSelected():
+            col.clearSelection()
+            item.setSelected(True)
+        sources = [it.data(Qt.ItemDataRole.UserRole) for it in col.selectedItems()]
+        sources = [s for s in sources if s]
+        if not sources:
+            return
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(s) for s in sources])
+        drag = QDrag(col)
+        drag.setMimeData(md)
+        drag.exec(Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+
+    def _handle_drop(self, col: QListWidget, ev) -> None:
+        from PySide6.QtCore import Qt as _Qt
+        sources = [u.toLocalFile() for u in ev.mimeData().urls() if u.toLocalFile()]
+        if not sources:
+            return
+        ev.acceptProposedAction()
+        idx = col.indexAt(ev.position().toPoint())
+        dest = None
+        if idx.isValid():
+            it = col.item(idx.row())
+            if it is not None and it.data(_Qt.ItemDataRole.UserRole + 1):
+                dest = it.data(_Qt.ItemDataRole.UserRole)
+        if dest is None and col in self._cols:
+            dest = self._paths[self._cols.index(col)]
+        if dest and self.move_handler:
+            # move_paths 内部会 refresh，级联会随之重建，这里不用再刷
+            self.move_handler(sources, dest)
+
+    # ---------------- 主题
+
+    def apply_theme(self, c: dict) -> None:
+        self._c = c
+        self._inner.setStyleSheet(f"background:{c['bg']};")
+        self.setStyleSheet(f"""
+            QFrame#cascadeBox {{ border-right:1px solid {c['border2']}; }}
+            QLabel#cascadeHead {{
+                background:{c['alt_bg']}; color:{c['dim']};
+                font-size:12px; padding:0 8px;
+                border-bottom:1px solid {c['border2']};
+            }}
+            QListWidget#cascadeCol {{
+                background:{c['bg']};
+                outline:none;
+            }}
+            QListWidget#cascadeCol::item {{
+                color:{c['fg']}; padding:4px 6px; border-radius:4px;
+            }}
+            QListWidget#cascadeCol::item:hover {{ background:{c['hover']}; }}
+            QListWidget#cascadeCol::item:selected {{
+                background:{c['accent_bg']}; color:{c['sel_fg']};
+            }}
+        """)
+
+
 class Explorer(QMainWindow):
-    VIEW_ICON, VIEW_LIST, VIEW_DETAIL = 0, 1, 2
+    VIEW_ICON, VIEW_LIST, VIEW_DETAIL, VIEW_CASCADE = 0, 1, 2, 3
 
     def __init__(self):
         super().__init__()
@@ -1335,6 +1661,8 @@ class Explorer(QMainWindow):
         self.show_hidden_ext = {".pyc", ".pyo", ".tmp", ".log"}
         self.view_mode = self.VIEW_ICON
         self.preview_enabled = True
+        self._preview_manual = False    # 用户手动拖过分隔条后，本次会话不再自动调宽
+        self._press_pos = None          # 拖拽起点的按下位置
         self.sort_key = "name"
         self.sort_desc = False
         self.clipboard: list[str] = []      # 复制的源路径
@@ -1402,16 +1730,17 @@ class Explorer(QMainWindow):
         self.search.textChanged.connect(self.on_search)
         nl.addWidget(self.search)
 
-        # 视图切换：三种模式一组按钮
+        # 视图切换：四种模式一组按钮
         self._view_btns = []
         wrap = QWidget()
-        wrap.setFixedSize(108, 36)
+        wrap.setFixedSize(142, 36)
         wrap_l = QHBoxLayout(wrap)
         wrap_l.setContentsMargins(2, 1, 2, 1)
         wrap_l.setSpacing(0)
         for mode, tip, ico in ((self.VIEW_ICON, "大图标 (Space 切换)", "grid"),
                                (self.VIEW_LIST, "列表", "list"),
-                               (self.VIEW_DETAIL, "详细信息", "rows")):
+                               (self.VIEW_DETAIL, "详细信息", "rows"),
+                               (self.VIEW_CASCADE, "级联显示（多列展开）", "cascade")):
             b = QToolButton()
             b.setToolTip(tip)
             b.setFixedSize(34, 34)
@@ -1493,7 +1822,18 @@ class Explorer(QMainWindow):
             QTimer.singleShot(0, self._connect_table_selection)
         self.list_table.dragEnterEvent = lambda e: self._drag_enter(e)
         self.list_table.dropEvent = lambda e: self._drop(e)
+        # 拖出靠 eventFilter 里的手动 QDrag（见 _begin_drag）
+        self.list_table.installEventFilter(self)
         self.stack.addWidget(self.list_table)
+
+        # 级联视图（Miller 列）
+        self.cascade = CascadeView()
+        self.cascade.path_changed.connect(self._on_cascade_path)
+        self.cascade.selection_changed.connect(self._on_cascade_selection)
+        self.cascade.open_file.connect(open_in_explorer)
+        self.cascade.context_menu_handler = self._cascade_context_menu
+        self.cascade.move_handler = self.move_paths
+        self.stack.addWidget(self.cascade)
 
         self.stack.addWidget(self._empty_page())
 
@@ -1524,6 +1864,7 @@ class Explorer(QMainWindow):
         self.splitter.setCollapsible(2, True)
         self.splitter.setSizes([210, 720, 250])
         self.splitter.setHandleWidth(4)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
         # 现在有了父对象，再设可见性就不会弹出游离的顶层小窗了
         self.preview.setVisible(self.preview_enabled)
         lay.addWidget(self.splitter, 1)
@@ -1637,11 +1978,40 @@ class Explorer(QMainWindow):
         sel = self.selected_paths()
         if len(sel) == 1:
             self.request_preview(sel[0])
+            self._fit_preview_width(sel[0])
         elif len(sel) > 1:
             self.preview.show_placeholder(
                 f"已选中 {len(sel)} 个项目\n仅选中单个文件夹时可预览")
         else:
             self.preview.show_placeholder()
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        """
+        用户拖过分隔条后，本次会话内不再自动调预览宽度——
+        否则刚拖到合眼缘的宽度，随便点一下文件就被改回去，很恼人。
+        """
+        if index == 1:                  # 0=侧栏|内容，1=内容|预览
+            self._preview_manual = True
+
+    def _fit_preview_width(self, path: str) -> None:
+        """让预览窗格宽度跟着文件名/文件夹名的长度走，限制在 220~520px。"""
+        if not self.preview_enabled or self._preview_manual:
+            return
+        if not hasattr(self, "splitter"):
+            return
+        name = os.path.basename(path.rstrip("\\/")) or path
+        fm = QFontMetrics(self.preview.font())
+        # 名称宽度 + 左侧图标与内边距；预览里还有大小/类型等行，稍放宽一点
+        need = fm.horizontalAdvance(name) + 56
+        want = max(220, min(520, need))
+        sizes = self.splitter.sizes()
+        if len(sizes) != 3:
+            return
+        if abs(sizes[2] - want) < 4:
+            return
+        total = sizes[0] + sizes[1] + sizes[2]
+        content = max(200, total - sizes[0] - want)
+        self.splitter.setSizes([sizes[0], content, total - sizes[0] - content])
 
     def toggle_preview(self):
         self.preview_enabled = not self.preview_enabled
@@ -1907,6 +2277,11 @@ class Explorer(QMainWindow):
         self._apply_tooltip_style(c)
         self._refresh_theme_icon()
         self._repaint_widgets_for_theme()
+        try:
+            self.cascade.apply_theme(c)
+        except AttributeError:
+            pass
+        self._sync_view_buttons()
 
     def _apply_tooltip_style(self, c: dict):
         """
@@ -2239,6 +2614,22 @@ class Explorer(QMainWindow):
         # 不先收掉的话，气泡会在点击/切目录的瞬间闪一下（小窗口），
         # 在深色环境下就是一个突兀的小黑块。
         QToolTip.hideText()
+
+        # 级联视图自己按列扫描目录，不走这里的列表渲染
+        if self.view_mode == self.VIEW_CASCADE:
+            self.stack.setCurrentWidget(self.cascade)
+            # cwd 还等于最右列（比如按 F5 刷新）就原地重扫，别把用户
+            # 已经展开的几层列收回去；导航到了别的目录才重置
+            same_view = bool(self.cascade._paths) and \
+                os.path.abspath(self.cascade._paths[-1]) == os.path.abspath(self.cwd)
+            if same_view:
+                self.cascade.reload()
+            else:
+                self.cascade.load(self.cwd)
+            n = self.cascade.item_count()
+            self.status_label.setText(f"共 {n:,} 个项目" if n else "此文件夹为空")
+            return
+
         q = self.search.text().strip().lower()
         dirs, files = self._sorted(res)
         if q:
@@ -2320,12 +2711,7 @@ class Explorer(QMainWindow):
 
     def set_view(self, mode: int):
         self.view_mode = mode
-        modes = [self.VIEW_ICON, self.VIEW_LIST, self.VIEW_DETAIL]
-        for i, b in enumerate(self._view_btns):
-            active = (i < len(modes) and modes[i] == mode)
-            b.setProperty("active", active)
-            b.setStyleSheet(
-                "background:#E3F2FD; border-radius:6px;" if active else "")
+        self._sync_view_buttons()
 
         self.list_table.setColumnHidden(1, mode != self.VIEW_DETAIL)
         self.list_table.setColumnHidden(2, mode != self.VIEW_DETAIL)
@@ -2334,22 +2720,33 @@ class Explorer(QMainWindow):
             self.list_table.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.Interactive)
             self.list_table.horizontalHeader().setDefaultSectionSize(280)
-        else:
+        elif mode != self.VIEW_CASCADE:
             self.list_table.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.Stretch)
         self.refresh()
+
+    def _sync_view_buttons(self):
+        """高亮当前视图按钮；底色取自当前主题，深色下才不会亮得刺眼。"""
+        c = getattr(self, "_c", THEMES["light"])
+        modes = [self.VIEW_ICON, self.VIEW_LIST, self.VIEW_DETAIL, self.VIEW_CASCADE]
+        for i, b in enumerate(getattr(self, "_view_btns", [])):
+            active = (i < len(modes) and modes[i] == self.view_mode)
+            b.setStyleSheet(
+                f"background:{c['accent_bg']}; border-radius:6px;" if active else "")
 
     def nav_parent_view_buttons(self):
         return getattr(self, "_view_btns", [])
 
     def action_toggle_view(self):
-        order = [self.VIEW_ICON, self.VIEW_DETAIL, self.VIEW_LIST]
+        order = [self.VIEW_ICON, self.VIEW_DETAIL, self.VIEW_LIST, self.VIEW_CASCADE]
         i = order.index(self.view_mode) if self.view_mode in order else 0
         self.set_view(order[(i + 1) % len(order)])
 
     # ---------------- 选择
 
     def selected_paths(self) -> list[str]:
+        if self.view_mode == self.VIEW_CASCADE:
+            return self.cascade.selected_paths()
         if self.view_mode == self.VIEW_ICON:
             out = []
             for it in self.icon_list.selectedItems():
@@ -2368,7 +2765,9 @@ class Explorer(QMainWindow):
         return out
 
     def select_all(self):
-        if self.view_mode == self.VIEW_ICON:
+        if self.view_mode == self.VIEW_CASCADE:
+            self.cascade.select_all()
+        elif self.view_mode == self.VIEW_ICON:
             self.icon_list.selectAll()
         else:
             self.list_table.selectAll()
@@ -2391,6 +2790,10 @@ class Explorer(QMainWindow):
             self.refresh_status_only()
 
     def refresh_status_only(self):
+        if self.view_mode == self.VIEW_CASCADE:
+            n = self.cascade.item_count()
+            self.status_label.setText(f"共 {n:,} 个项目" if n else "此文件夹为空")
+            return
         self.status_label.setText(f"共 {self.icon_list.count() or self.list_table.rowCount():,} 个项目"
                                   if self.stack.currentWidget() is not self._empty_widget
                                   else "此文件夹为空")
@@ -2422,6 +2825,25 @@ class Explorer(QMainWindow):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
 
+    def _drop_target(self, e):
+        """落点若是文件夹行，返回该文件夹路径；否则回到当前目录。"""
+        view = self.stack.currentWidget()
+        pos = e.position().toPoint()
+        path = None
+        if view is self.list_table:
+            idx = self.list_table.indexAt(pos)
+            if idx.isValid():
+                it = self.list_table.item(idx.row(), 0)
+                if it is not None:
+                    path = it.data(Qt.ItemDataRole.UserRole)
+        elif view is self.icon_list:
+            it = self.icon_list.itemAt(pos)
+            if it is not None:
+                path = it.data(Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            return path
+        return None
+
     def _drop(self, e):
         if not e.mimeData().hasUrls():
             return
@@ -2429,7 +2851,50 @@ class Explorer(QMainWindow):
         if not paths:
             return
         e.acceptProposedAction()
-        self.copy_paths(paths, self.cwd)
+        dest = self._drop_target(e) or self.cwd
+        # 自己拖自己 → 移动；从别的程序拖进来 → 复制（保持原有行为）
+        if e.mimeData().hasFormat(INTERNAL_MIME):
+            self.move_paths(paths, dest)
+        else:
+            self.copy_paths(paths, dest)
+
+    def _begin_drag(self, view, pos):
+        """手动发起拖拽：QTableWidget 的内建拖拽拿不到文件 URL。"""
+        row = -1
+        item = None
+        if view is self.icon_list:
+            item = self.icon_list.itemAt(pos)
+            if item is None:
+                return
+            path = item.data(Qt.ItemDataRole.UserRole)
+        else:
+            idx = self.list_table.indexAt(pos)
+            if not idx.isValid():
+                return
+            row = idx.row()
+            item = self.list_table.item(row, 0)
+            if item is None:
+                return
+            path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+
+        # 拖的是没选中的项 → 先把它变成唯一选中项，否则会拖走一堆没想拖的
+        if path not in self.selected_paths():
+            if view is self.icon_list:
+                self.icon_list.clearSelection()
+                item.setSelected(True)
+            else:
+                self.list_table.clearSelection()
+                self.list_table.selectRow(row)
+
+        sources = self.selected_paths() or [path]
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(s) for s in sources])
+        md.setData(INTERNAL_MIME, b"1")
+        drag = QDrag(view)
+        drag.setMimeData(md)
+        drag.exec(Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
 
     # ---------------- 动作
 
@@ -2601,6 +3066,10 @@ class Explorer(QMainWindow):
             path = self._table_item(idx.row()).data(
                 Qt.ItemDataRole.UserRole) if idx.isValid() else None
 
+        self._popup_menu(path, self.cursor().pos())
+
+    def _popup_menu(self, path, global_pos):
+        """按是否选中条目弹出菜单；列表、图标、级联三种视图共用。"""
         m = QMenu(self)
         if path:
             m.addAction("打开", lambda: self.on_double_click(
@@ -2638,7 +3107,36 @@ class Explorer(QMainWindow):
             m.addAction("刷新", self.refresh)
             m.addAction("显示隐藏文件" + ("  ✓" if self.show_hidden else ""),
                         self.action_show_hidden)
-        m.exec(self.cursor().pos())
+        m.exec(global_pos)
+
+    # ---------------- 级联视图回调
+
+    def _on_cascade_path(self, path: str):
+        """级联展开到新目录：只同步地址/面包屑，不重建级联。"""
+        if not path:
+            return
+        self.cwd = path
+        self.path_edit.setText(path)
+        self.setWindowTitle(
+            f"{os.path.basename(path) or path} — {APP_NAME} {APP_VERSION}")
+        self._update_crumbs()
+        self._update_nav_buttons()
+        self._sync_side_selection(path)
+
+    def _on_cascade_selection(self, path: str):
+        if path:
+            self.update_status()
+        if not self.preview_enabled:
+            return
+        if path:
+            self.request_preview(path)
+            self._fit_preview_width(path)
+        else:
+            self.preview.show_placeholder()
+
+    def _cascade_context_menu(self, global_pos):
+        sel = self.cascade.selected_paths()
+        self._popup_menu(sel[0] if len(sel) == 1 else None, global_pos)
 
     def _open_in_new_window(self, path):
         w = Explorer()
@@ -2736,6 +3234,25 @@ class Explorer(QMainWindow):
             if event.key() == Qt.Key.Key_F2:
                 self.action_rename()
                 return True
+
+        # 图标/列表视图：自己发起拖拽。
+        # QTableWidget 的模型是私有的，拿不到带文件 URL 的 mimeData，
+        # 内建拖拽只能在表格内部挪行，拖到别的程序或文件夹上都没反应。
+        if obj is self.icon_list or obj is self.list_table:
+            t = event.type()
+            if t == event.Type.MouseButtonPress \
+                    and event.button() == Qt.MouseButton.LeftButton:
+                self._press_pos = event.position().toPoint()
+            elif t == event.Type.MouseMove:
+                if self._press_pos is not None \
+                        and (event.buttons() & Qt.MouseButton.LeftButton):
+                    if (event.position().toPoint() - self._press_pos
+                            ).manhattanLength() >= QApplication.startDragDistance():
+                        pos = self._press_pos
+                        self._press_pos = None
+                        self._begin_drag(obj, pos)
+            elif t == event.Type.MouseButtonRelease:
+                self._press_pos = None
         return super().eventFilter(obj, event)
 
 

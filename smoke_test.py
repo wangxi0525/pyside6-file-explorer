@@ -76,6 +76,67 @@ def main():
     app.processEvents()
     check("列表模式行数", w.list_table.rowCount() == 2)
 
+    # 级联视图（Miller 列）
+    w.navigate(tmp)
+    app.processEvents()
+    w.set_view(w.VIEW_CASCADE)
+    app.processEvents()
+    check("级联是第 4 种视图", w.VIEW_CASCADE == 3)
+    check("工具栏有 4 个视图按钮", len(w._view_btns) == 4, len(w._view_btns))
+    check("切到级联后显示级联控件", w.stack.currentWidget() is w.cascade)
+    check("级联初始只有一列", len(w.cascade._cols) == 1, len(w.cascade._cols))
+    check("每列都带列头", len(w.cascade._boxes) ==len(w.cascade._cols))
+
+    col0 = w.cascade._cols[0]
+    sub = None
+    for i in range(col0.count()):
+        it = col0.item(i)
+        if it.data(Qt.ItemDataRole.UserRole + 1):
+            sub = it
+            break
+    if sub is not None:
+        w.cascade._on_click(col0, sub)
+        app.processEvents()
+        check("点文件夹向右展开新列", len(w.cascade._cols) == 2,
+              len(w.cascade._cols))
+        check("新列指向被点的文件夹",
+              w.cascade._paths[1] == sub.data(Qt.ItemDataRole.UserRole),
+              w.cascade._paths)
+        check("cwd 跟随最右列", os.path.abspath(w.cwd) == w.cascade._paths[-1],
+              w.cwd)
+        # 再点回第一列另一个项，应砍掉右侧列而不是越铺越宽
+        w.cascade._on_click(col0, sub)
+        app.processEvents()
+        check("重复点同一项不叠加列", len(w.cascade._cols) == 2,
+              len(w.cascade._cols))
+
+    # 预览窗格按名称长度自适应
+    w.navigate(tmp)
+    w.set_view(w.VIEW_LIST)
+    app.processEvents()
+    w._preview_manual = False
+    w._fit_preview_width(os.path.join(tmp, "a.txt"))
+    app.processEvents()
+    narrow = w.splitter.sizes()[2]
+    w._fit_preview_width(os.path.join(tmp, "很长" * 20 + ".txt"))
+    app.processEvents()
+    wide = w.splitter.sizes()[2]
+    check("预览宽度随名称变宽", wide > narrow, f"{narrow} -> {wide}")
+    check("预览宽度下限 220", narrow >= 220, narrow)
+    check("预览宽度上限 520", wide <= 520, wide)
+    w._on_splitter_moved(0, 1)
+    check("手动拖过分隔条后停止自动", w._preview_manual is True)
+    w._preview_manual = False
+
+    # 拖拽：内部拖动带 url 且带内部标记
+    from main_window import INTERNAL_MIME
+    from PySide6.QtCore import QMimeData, QUrl
+    md = QMimeData()
+    md.setUrls([QUrl.fromLocalFile(os.path.join(tmp, "a.txt"))])
+    md.setData(INTERNAL_MIME, b"1")
+    check("内部拖拽携带文件 URL", md.hasUrls())
+    check("内部拖拽带内部标记", md.hasFormat(INTERNAL_MIME))
+
     # 排序
     w.sort_key, w.sort_desc = "size", True
     w.refresh()
