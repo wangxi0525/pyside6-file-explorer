@@ -5,6 +5,7 @@ smoke_test.py —— 无界面冒烟测试
 import os
 import sys
 import tempfile
+import time
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -214,6 +215,79 @@ def main():
     md.setUrls([QUrl.fromLocalFile(os.path.join(tmp, "说明.md"))])
     md.setData(mw.INTERNAL_MIME, b"1")
     check("内部拖拽可构造", md.hasUrls() and md.hasFormat(mw.INTERNAL_MIME))
+
+    # 完整拖放链路：DragEnter → DragMove → Drop，验证真的把文件移进文件夹
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+    src_file = os.path.join(tmp, "拖放测试.txt")
+    with open(src_file, "w", encoding="utf-8") as fh:
+        fh.write("x")
+    w.navigate(tmp)
+    app.processEvents()
+    tbl = w.list_table
+    dst_row = next(r for r in range(tbl.rowCount())
+                   if tbl.item(r, 0).text() == "子目录")
+    dst_pos = tbl.visualItemRect(tbl.item(dst_row, 0)).center()
+    vp = tbl.viewport()
+
+    md_move = QMimeData()
+    md_move.setUrls([QUrl.fromLocalFile(src_file)])
+    md_move.setData(mw.INTERNAL_MIME, b"1")
+    for ev in (
+        QDragEnterEvent(dst_pos, Qt.DropAction.MoveAction, md_move,
+                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+        QDragMoveEvent(dst_pos, Qt.DropAction.MoveAction, md_move,
+                       Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+        QDropEvent(QPointF(dst_pos), Qt.DropAction.MoveAction, md_move,
+                   Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+    ):
+        QApplication.sendEvent(vp, ev)
+    app.processEvents()
+    moved_path = os.path.join(tmp, "子目录", "拖放测试.txt")
+    check("拖到文件夹上会移动进去", os.path.isfile(moved_path), moved_path)
+    check("源文件已不在原处", not os.path.isfile(src_file))
+
+    # 按住 Ctrl 拖动 → 复制，源文件保留
+    src2 = os.path.join(tmp, "复制测试.txt")
+    with open(src2, "w", encoding="utf-8") as fh:
+        fh.write("y")
+    w.navigate(tmp)
+    app.processEvents()
+    dst_row = next(r for r in range(w.list_table.rowCount())
+                   if w.list_table.item(r, 0).text() == "子目录")
+    dst_pos = w.list_table.visualItemRect(
+        w.list_table.item(dst_row, 0)).center()
+    vp = w.list_table.viewport()
+    md_copy = QMimeData()
+    md_copy.setUrls([QUrl.fromLocalFile(src2)])
+    md_copy.setData(mw.INTERNAL_MIME, b"1")
+    for ev in (
+        QDragEnterEvent(dst_pos, Qt.DropAction.CopyAction, md_copy,
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.ControlModifier),
+        QDropEvent(QPointF(dst_pos), Qt.DropAction.CopyAction, md_copy,
+                   Qt.MouseButton.LeftButton,
+                   Qt.KeyboardModifier.ControlModifier),
+    ):
+        QApplication.sendEvent(vp, ev)
+    app.processEvents()
+    # copy_paths 走后台线程，给它一点时间
+    for _ in range(60):
+        if os.path.isfile(os.path.join(tmp, "子目录", "复制测试.txt")):
+            break
+        time.sleep(0.05)
+        app.processEvents()
+    check("按住 Ctrl 拖动是复制，源文件保留", os.path.isfile(src2))
+    check("目标文件夹里出现了副本",
+          os.path.isfile(os.path.join(tmp, "子目录", "复制测试.txt")))
+
+    # 清掉拖放用例留下的文件，后面的"排序"等断言依赖目录里只有 2 项
+    for _p in (os.path.join(tmp, "子目录", "拖放测试.txt"),
+               os.path.join(tmp, "子目录", "复制测试.txt"),
+               src2):
+        try:
+            os.remove(_p)
+        except OSError:
+            pass
 
     # 排序
     w.sort_key, w.sort_desc = "size", True

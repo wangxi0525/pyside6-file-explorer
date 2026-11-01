@@ -11,7 +11,7 @@ from PySide6.QtCore import (Qt, QDir, QSize, QTimer, QStandardPaths,
                             QPropertyAnimation, QEasingCurve, Signal,
                             QThread, QObject, QMetaObject, Q_ARG, Slot,
                             QRectF, QUrl, QMimeData, QEvent, QPoint)
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices,
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices,
                            QDrag, QDragEnterEvent, QDropEvent, QFontMetrics,
                            QGuiApplication,
                            QKeySequence, QIcon, QPainter, QPen, QPixmap)
@@ -1699,6 +1699,7 @@ class Explorer(QMainWindow):
         self.preview_enabled = True
         self._preview_manual = False    # 用户手动拖过分隔条后，本次会话不再自动调宽
         self._press_pos = None          # 拖拽起点的按下位置
+        self._hl_item = None            # 拖动经过时高亮的目标行
         self.sort_key = "name"
         self.sort_desc = False
         self.clipboard: list[str] = []      # 复制的源路径
@@ -1824,6 +1825,7 @@ class Explorer(QMainWindow):
         self.icon_list.itemSelectionChanged.connect(self.update_status)
         self.icon_list.itemSelectionChanged.connect(self._on_selection_preview)
         self.icon_list.setAcceptDrops(True)
+        self.icon_list.viewport().setAcceptDrops(True)
         self.icon_list.installEventFilter(self)
         self.icon_list.viewport().installEventFilter(self)
         self.icon_list.dragEnterEvent = lambda e: self._drag_enter(e)
@@ -1851,6 +1853,7 @@ class Explorer(QMainWindow):
             lambda r, _: self.on_double_click(self._table_item(r)))
         self.list_table.setSortingEnabled(True)
         self.list_table.setAcceptDrops(True)
+        self.list_table.viewport().setAcceptDrops(True)
         if self.list_table.selectionModel():
             self.list_table.selectionModel().selectionChanged.connect(
                 self._on_selection_preview)
@@ -3000,7 +3003,17 @@ class Explorer(QMainWindow):
         md.setData(INTERNAL_MIME, b"1")
         drag = QDrag(view)
         drag.setMimeData(md)
-        drag.exec(Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+        # 带个图标当拖影，否则默认只有一个小光标，看不出正在拖东西
+        try:
+            pm = icon_for(sources[0], os.path.isdir(sources[0]), 48)
+            if not pm.isNull():
+                drag.setPixmap(pm)
+                drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
+        except Exception:
+            pass
+        # 两个动作都允许：按住 Ctrl 时系统会切成复制
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+                  Qt.DropAction.MoveAction)
 
     # ---------------- 动作
 
@@ -3341,31 +3354,156 @@ class Explorer(QMainWindow):
                 self.action_rename()
                 return True
 
-        # 图标/列表视图：自己发起拖拽。
-        # 注意鼠标事件是发给 viewport 的，不是发给 QListWidget/QTableWidget
-        # 本身——过滤器只装在控件上会一个 MouseMove 都收不到，拖动永远不触发。
-        # QTableWidget 的模型又是私有的，内建拖拽拿不到带文件 URL 的 mimeData。
+        # 图标/列表视图：拖出和拖入都在这里处理。两个坑：
+        #   1) 鼠标与拖放事件都是发给 viewport 的，不是发给 QListWidget /
+        #      QTableWidget 本身，过滤器只装在控件上一个都收不到；
+        #   2) viewport 默认不接受拖放，不显式 setAcceptDrops(True)，
+        #      DragEnter / Drop 根本不会送到这里来——这是"拖动没反应"的原因。
         view = None
         if obj is self.icon_list or obj is self.icon_list.viewport():
             view = self.icon_list
         elif obj is self.list_table or obj is self.list_table.viewport():
             view = self.list_table
-        if view is not None:
-            t = event.type()
-            if t == event.Type.MouseButtonPress \
-                    and event.button() == Qt.MouseButton.LeftButton:
-                self._press_pos = event.position().toPoint()
-            elif t == event.Type.MouseMove:
-                if self._press_pos is not None \
-                        and (event.buttons() & Qt.MouseButton.LeftButton):
-                    if (event.position().toPoint() - self._press_pos
-                            ).manhattanLength() >= QApplication.startDragDistance():
-                        pos = self._press_pos
-                        self._press_pos = None
-                        self._begin_drag(view, pos)
-            elif t == event.Type.MouseButtonRelease:
-                self._press_pos = None
+        if view is None:
+            return super().eventFilter(obj, event)
+
+        t = event.type()
+        if t == event.Type.MouseButtonPress \
+                and event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+        elif t == event.Type.MouseMove:
+            if self._press_pos is not None \
+                    and (event.buttons() & Qt.MouseButton.LeftButton):
+                if (event.position().toPoint() - self._press_pos
+                        ).manhattanLength() >= QApplication.startDragDistance():
+                    pos = self._press_pos
+                    self._press_pos = None
+                    self._begin_drag(view, pos)
+        elif t == event.Type.MouseButtonRelease:
+            self._press_pos = None
+        elif t == event.Type.DragEnter:
+            return self._on_drag_enter(view, event)
+        elif t == event.Type.DragMove:
+            return self._on_drag_move(view, event)
+        elif t == event.Type.DragLeave:
+            self._clear_drop_highlight()
+            return False
+        elif t == event.Type.Drop:
+            return self._on_drop_into(view, event)
         return super().eventFilter(obj, event)
+
+    # ---------------- 拖放：移动 / 复制
+
+    def _drop_dir_at(self, view, pos):
+        """落点若压在文件夹行上，返回该文件夹；否则返回 None（落到当前目录）。"""
+        if view is self.list_table:
+            idx = view.indexAt(pos)
+            if not idx.isValid():
+                return None
+            it = view.item(idx.row(), 0)
+            path = it.data(Qt.ItemDataRole.UserRole) if it else None
+        else:
+            it = view.itemAt(pos)
+            path = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if path and os.path.isdir(path):
+            return path
+        return None
+
+    def _planned_action(self, e, dest):
+        """
+        对齐资源管理器的默认行为：
+        - 按住 Ctrl → 复制；按住 Shift → 移动（优先于下面）
+        - 都不按 → 同一个盘内移动，跨盘复制
+        """
+        mods = e.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            return Qt.DropAction.CopyAction
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            return Qt.DropAction.MoveAction
+        srcs = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        if not srcs or not dest:
+            return Qt.DropAction.MoveAction
+        s_drive = os.path.splitdrive(srcs[0])[0].lower()
+        d_drive = os.path.splitdrive(dest)[0].lower()
+        return (Qt.DropAction.MoveAction if s_drive == d_drive
+                else Qt.DropAction.CopyAction)
+
+    def _on_drag_enter(self, view, e):
+        if not e.mimeData().hasUrls():
+            e.ignore()
+            return True
+        dest = self._drop_dir_at(view, e.position().toPoint()) or self.cwd
+        e.setDropAction(self._planned_action(e, dest))
+        e.accept()
+        return True
+
+    def _on_drag_move(self, view, e):
+        if not e.mimeData().hasUrls():
+            e.ignore()
+            return True
+        dest = self._drop_dir_at(view, e.position().toPoint())
+        self._set_drop_highlight(view, dest)
+        act = self._planned_action(e, dest or self.cwd)
+        e.setDropAction(act)
+        e.accept()
+        verb = "复制到" if act == Qt.DropAction.CopyAction else "移动到"
+        self.statusBar().showMessage(f"{verb} {dest or self.cwd}")
+        return True
+
+    def _on_drop_into(self, view, e):
+        if not e.mimeData().hasUrls():
+            e.ignore()
+            return True
+        sources = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        self._clear_drop_highlight()
+        if not sources:
+            e.ignore()
+            return True
+        dest = self._drop_dir_at(view, e.position().toPoint()) or self.cwd
+        # 拖回自己所在的目录，什么都不用做
+        if any(os.path.abspath(s) == os.path.abspath(dest) for s in sources):
+            e.ignore()
+            return True
+        act = self._planned_action(e, dest)
+        e.setDropAction(act)
+        e.accept()
+        if act == Qt.DropAction.CopyAction:
+            self.copy_paths(sources, dest)
+        else:
+            self.move_paths(sources, dest)
+        return True
+
+    def _set_drop_highlight(self, view, path):
+        """拖动经过文件夹行时给点视觉反馈。"""
+        self._clear_drop_highlight(keep_message=True)
+        if not path:
+            return
+        c = getattr(self, "_c", THEMES["light"])
+        brush = QBrush(QColor(c["accent_bg"]))
+        if view is self.list_table:
+            for r in range(view.rowCount()):
+                it = view.item(r, 0)
+                if it is not None and it.data(Qt.ItemDataRole.UserRole) == path:
+                    it.setBackground(brush)
+                    self._hl_item = it
+                    return
+        else:
+            for i in range(view.count()):
+                it = view.item(i)
+                if it.data(Qt.ItemDataRole.UserRole) == path:
+                    it.setBackground(brush)
+                    self._hl_item = it
+                    return
+
+    def _clear_drop_highlight(self, keep_message=False):
+        if getattr(self, "_hl_item", None) is not None:
+            try:
+                self._hl_item.setBackground(QBrush())
+            except RuntimeError:
+                pass
+            self._hl_item = None
+        if not keep_message:
+            self.statusBar().clearMessage()
 
 
 # ---------------------------------------------------------------- 入口
