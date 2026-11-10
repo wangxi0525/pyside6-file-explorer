@@ -108,19 +108,71 @@ def _make_pixmap(kind: str, is_dir: bool, size: int = 48) -> QPixmap:
 
 
 _icon_cache: dict[tuple, QIcon] = {}
+_icon_provider = None
+
+
+def _get_icon_provider():
+    """
+    懒加载系统图标提供者。
+
+    QFileIconProvider 在 Windows 上走 Shell 的 SHGetFileInfo，
+    拿到的就是资源管理器里显示的那套图标。没有 GUI 环境时返回 None，
+    由调用方回退到自绘图标。
+    """
+    global _icon_provider
+    if _icon_provider is None:
+        try:
+            from PySide6.QtWidgets import QFileIconProvider
+            _icon_provider = QFileIconProvider()
+        except Exception:
+            _icon_provider = False      # 记住失败，不要每次都重试
+    return _icon_provider or None
 
 
 def icon_for(path: str, is_dir: bool, size: int = 48) -> QIcon:
-    """带缓存的图标获取，列表滚动时不会重复绘制。"""
+    """
+    取系统图标，显示效果和 Windows 资源管理器一致。
+
+    缓存分三档，避免每帧都去问 Shell：
+      - 文件夹：系统只有一个样式，缓存一份
+      - 普通文件：按扩展名缓存，同类型图标相同
+      - exe / lnk / ico：每个程序图标都不一样，只能按完整路径缓存
+    """
+    ext = "" if is_dir else os.path.splitext(path)[1].lower()
     if is_dir:
-        key = ("dir", size)
+        key = ("dir",)
+    elif ext in (".exe", ".lnk", ".ico", ".msi", ".url") or not ext:
+        key = ("path", path.lower())
     else:
-        ext = os.path.splitext(path)[1].lower()
-        key = (EXT_COLOR_MAP.get(ext, "其他"), size)
-    if key not in _icon_cache:
-        _icon_cache[key] = QIcon(_make_pixmap(key[0] if not is_dir else "dir",
-                                               is_dir, size))
-    return _icon_cache[key]
+        key = ("ext", ext)
+
+    hit = _icon_cache.get(key)
+    if hit is not None:
+        return hit
+
+    icon = None
+    prov = _get_icon_provider()
+    if prov is not None:
+        try:
+            from PySide6.QtCore import QFileInfo
+            # 路径不存在时（虚拟条目、刚删掉的文件）按扩展名要一个默认图标
+            target = path if os.path.exists(path) else ("x" + ext if ext else path)
+            icon = prov.icon(QFileInfo(target))
+            if icon is None or icon.isNull():
+                icon = None
+        except Exception:
+            icon = None
+
+    if icon is None:
+        # 回退：Shell 拿不到（无 GUI、权限、未知类型）时用自绘图标兜底
+        kind = "dir" if is_dir else EXT_COLOR_MAP.get(ext, "其他")
+        icon = QIcon(_make_pixmap(kind, is_dir, size))
+
+    # 按路径缓存的那批（exe）会越积越多，超过上限整体清一次
+    if len(_icon_cache) > 600:
+        _icon_cache.clear()
+    _icon_cache[key] = icon
+    return icon
 
 
 def is_hidden(path: str, name: str) -> bool:

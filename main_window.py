@@ -34,7 +34,7 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 
 # 内部拖拽的标记：带这个格式说明是窗口内自己拖自己，
 # 落到文件夹上应当"移动"，而从别的程序拖进来仍然是"复制"。
