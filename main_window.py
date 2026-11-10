@@ -4,6 +4,7 @@ main_window.py —— 主窗口与界面逻辑
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -33,7 +34,7 @@ from core import (DirScan, DriveInfo, PreviewInfo, Worker, drive_icon_pixmap,
                   remove_favorite, toggle_favorite)
 
 APP_NAME = "Qt 资源管理器"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 # 内部拖拽的标记：带这个格式说明是窗口内自己拖自己，
 # 落到文件夹上应当"移动"，而从别的程序拖进来仍然是"复制"。
@@ -1335,6 +1336,52 @@ def _view_pixmap(kind: str, size: int = 18, color="#546E7A") -> QPixmap:
     return pm
 
 
+def _natural_key(s: str):
+    """
+    自然排序用的 key：把字符串里的数字段按数值比较。
+
+    直接比字符串的话 "文件10" 会排在 "文件2" 前面，资源管理器不是这样的。
+    每段包成 (类型, 值) 元组，避免 int 和 str 直接比较时抛 TypeError。
+    """
+    parts = re.split(r"(\d+)", s.lower())
+    return [(1, int(p)) if p.isdigit() else (0, p) for p in parts]
+
+
+def _sort_entries(dirs, files, key: str, desc: bool):
+    """
+    统一的排序规则，详情/列表/图标/级联四个视图共用。
+
+    - 文件夹永远排在文件前面（和资源管理器一致），两组各自排序
+    - 名称用自然排序，文件2 排在 文件10 之前
+    - 大小只对文件有意义，文件夹按名称
+    - 类型按扩展名归类，同类内再按名称
+    - desc 时两组各自倒序，不会出现文件插到文件夹中间
+    """
+    def key_dir(d):
+        # 注意：DirScan.dirs 只有 (name, path) 两个字段，没有 mtime，
+        # 按时间排序必须现取一次 stat，否则会拿路径字符串当时间比。
+        name, path = d[0], d[1]
+        if key == "mtime":
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return 0.0
+        return _natural_key(name)
+
+    def key_file(f):
+        name, size, mt = f[0], f[2], f[3]
+        if key == "size":
+            return size
+        if key == "mtime":
+            return mt
+        if key == "kind":
+            return (kind_of(name), _natural_key(name))
+        return _natural_key(name)
+
+    return (sorted(dirs, key=key_dir, reverse=desc),
+            sorted(files, key=key_file, reverse=desc))
+
+
 def _cover_width(fm: QFontMetrics, names, cover: float = 0.9) -> int:
     """
     返回"能盖住 cover 比例条目名"的宽度（像素）。
@@ -1380,6 +1427,8 @@ class CascadeView(QWidget):
         self._active = -1
         self._c = THEMES["light"]
         self.show_hidden = False
+        self.sort_key = "name"      # 由 Explorer 同步过来，和主视图保持一致
+        self.sort_desc = False
         self.context_menu_handler = None   # Explorer 注入：fn(pos)
         self.move_handler = None           # Explorer 注入：fn(sources, dest)
         self._press_pos: QPoint | None = None
@@ -1453,12 +1502,14 @@ class CascadeView(QWidget):
         res = scan_dir(path, show_hidden=self.show_hidden)
         if res.error:
             return
-        for name, p in sorted(res.dirs, key=lambda d: d[0].lower()):
+        dirs, files = _sort_entries(res.dirs, res.files,
+                                    self.sort_key, self.sort_desc)
+        for name, p in dirs:
             it = QListWidgetItem(icon_for(p, True, 18), name)
             it.setData(Qt.ItemDataRole.UserRole, p)
             it.setData(Qt.ItemDataRole.UserRole + 1, True)
             lst.addItem(it)
-        for name, p, _size, _mt in sorted(res.files, key=lambda f: f[0].lower()):
+        for name, p, _size, _mt in files:
             it = QListWidgetItem(icon_for(p, False, 18), name)
             it.setData(Qt.ItemDataRole.UserRole, p)
             it.setData(Qt.ItemDataRole.UserRole + 1, False)
@@ -1851,7 +1902,13 @@ class Explorer(QMainWindow):
         self.list_table.customContextMenuRequested.connect(self.show_context_menu)
         self.list_table.cellDoubleClicked.connect(
             lambda r, _: self.on_double_click(self._table_item(r)))
-        self.list_table.setSortingEnabled(True)
+        # 关掉 Qt 内建排序。它按单元格里显示的文本比较，"1.2 MB"、"10 KB"
+        # 这种字符串比大小必然出错；而且点了表头不会更新我们的 sort_key，
+        # 一刷新顺序又被 _sorted 顶回去。改成自己接管表头点击。
+        self.list_table.setSortingEnabled(False)
+        self.list_table.horizontalHeader().setSectionsClickable(True)
+        self.list_table.horizontalHeader().sectionClicked.connect(
+            self._on_header_clicked)
         self.list_table.setAcceptDrops(True)
         self.list_table.viewport().setAcceptDrops(True)
         if self.list_table.selectionModel():
@@ -1927,6 +1984,7 @@ class Explorer(QMainWindow):
         # 恢复上次选的主题（默认浅色）
         self.theme = load_theme()
         self.apply_light_theme()
+        self._update_header_labels()
 
         # 快捷键
         self._install_shortcuts()
@@ -2692,27 +2750,7 @@ class Explorer(QMainWindow):
     # ---------------- 渲染
 
     def _sorted(self, res: DirScan):
-        def key_dir(d):
-            if self.sort_key == "name":
-                return d[0].lower()
-            if self.sort_key == "mtime":
-                return d[1]
-            return d[0].lower()
-
-        def key_file(f):
-            if self.sort_key == "name":
-                return f[0].lower()
-            if self.sort_key == "size":
-                return f[2]
-            if self.sort_key == "mtime":
-                return f[3]
-            if self.sort_key == "kind":
-                return kind_of(f[0])
-            return f[0].lower()
-
-        dirs = sorted(res.dirs, key=key_dir, reverse=self.sort_desc)
-        files = sorted(res.files, key=key_file, reverse=self.sort_desc)
-        return dirs, files
+        return _sort_entries(res.dirs, res.files, self.sort_key, self.sort_desc)
 
     def _render(self, res: DirScan):
         # 重绘会把鼠标底下的条目一起销毁，连同它的悬浮气泡。
@@ -2765,7 +2803,6 @@ class Explorer(QMainWindow):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
                 self.icon_list.addItem(it)
         else:
-            self.list_table.setSortingEnabled(False)
             self.list_table.setRowCount(0)
             self.list_table.setRowCount(total)
             row = 0
@@ -2781,8 +2818,7 @@ class Explorer(QMainWindow):
                                datetime.fromtimestamp(mt).strftime("%Y/%m/%d %H:%M"),
                                False)
                 row += 1
-            self.list_table.setSortingEnabled(True)
-            self.list_table.sortItems(self._col_for_sort())
+            # 行顺序已经由 _sorted 排好，不要再让 Qt 内建排序插一脚
             self._connect_table_selection()
 
         size_txt = f"共 {total:,} 个项目"
@@ -2808,6 +2844,73 @@ class Explorer(QMainWindow):
 
     def _col_for_sort(self):
         return {"name": 0, "size": 1, "kind": 2, "mtime": 3}.get(self.sort_key, 0)
+
+    # ---------------- 排序
+
+    def _on_header_clicked(self, col: int):
+        """点表头：同一列再点切换升降序，换列则回到升序。"""
+        key = {0: "name", 1: "size", 2: "kind", 3: "mtime"}.get(col)
+        if key is None:
+            return
+        if key == self.sort_key:
+            self.sort_desc = not self.sort_desc
+        else:
+            self.sort_key = key
+            self.sort_desc = False
+        self._update_header_labels()
+        self.refresh()
+
+    def set_sort(self, key: str, desc: bool | None = None):
+        """菜单 / 外部入口：指定排序字段，desc 为空时沿用当前方向。"""
+        if key not in ("name", "size", "kind", "mtime"):
+            return
+        if desc is None:
+            desc = self.sort_desc if key == self.sort_key else False
+        self.sort_key = key
+        self.sort_desc = bool(desc)
+        self._update_header_labels()
+        self.refresh()
+
+    def _update_header_labels(self):
+        """表头带上 ▲/▼，同时把排序设置同步给级联视图和图标视图。"""
+        labels = ["名称", "大小", "类型", "修改时间"]
+        col = {"name": 0, "size": 1, "kind": 2, "mtime": 3}.get(self.sort_key)
+        if col is not None:
+            labels[col] += " ▼" if self.sort_desc else " ▲"
+        if hasattr(self, "list_table"):
+            self.list_table.setHorizontalHeaderLabels(labels)
+        if hasattr(self, "cascade"):
+            self.cascade.sort_key = self.sort_key
+            self.cascade.sort_desc = self.sort_desc
+
+    def show_sort_menu(self):
+        """图标/级联视图没有表头，从菜单里改排序。"""
+        m = QMenu(self)
+        for key, label in (("name", "名称"), ("size", "大小"),
+                           ("kind", "类型"), ("mtime", "修改时间")):
+            mark = "  ✓" if key == self.sort_key else ""
+            m.addAction(f"按{label}{mark}",
+                        lambda _=False, k=key: self.set_sort(k))
+        m.addSeparator()
+        m.addAction("升序" + ("  ✓" if not self.sort_desc else ""),
+                    lambda: self.set_sort(self.sort_key, False))
+        m.addAction("降序" + ("  ✓" if self.sort_desc else ""),
+                    lambda: self.set_sort(self.sort_key, True))
+        m.exec(self.cursor().pos())
+
+    def _add_sort_submenu(self, menu: QMenu):
+        """往给定菜单里挂一个「排序方式」子菜单，主菜单和右键菜单共用。"""
+        sub = menu.addMenu("排序方式")
+        for key, label in (("name", "名称"), ("size", "大小"),
+                           ("kind", "类型"), ("mtime", "修改时间")):
+            act = sub.addAction(label + ("  ✓" if key == self.sort_key else ""))
+            act.triggered.connect(lambda _=False, k=key: self.set_sort(k))
+        sub.addSeparator()
+        a_asc = sub.addAction("升序" + ("  ✓" if not self.sort_desc else ""))
+        a_asc.triggered.connect(lambda: self.set_sort(self.sort_key, False))
+        a_desc = sub.addAction("降序" + ("  ✓" if self.sort_desc else ""))
+        a_desc.triggered.connect(lambda: self.set_sort(self.sort_key, True))
+        return sub
 
     def _table_item(self, row):
         return self.list_table.item(row, 0)
@@ -3159,6 +3262,7 @@ class Explorer(QMainWindow):
         m.addAction("在此处打开命令行", lambda: open_terminal(self.cwd))
         m.addAction("刷新", self.refresh)
         m.addSeparator()
+        self._add_sort_submenu(m)
         m.addAction("显示隐藏文件" + ("  ✓" if self.show_hidden else ""),
                     self.action_show_hidden)
         m.addAction("预览窗格" + ("  ✓" if self.preview_enabled else ""),
@@ -3226,6 +3330,9 @@ class Explorer(QMainWindow):
             m.addAction("刷新", self.refresh)
             m.addAction("显示隐藏文件" + ("  ✓" if self.show_hidden else ""),
                         self.action_show_hidden)
+        # 排序和选中项无关，两个分支都挂上
+        m.addSeparator()
+        self._add_sort_submenu(m)
         m.exec(global_pos)
 
     # ---------------- 级联视图回调

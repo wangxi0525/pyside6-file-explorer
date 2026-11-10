@@ -289,11 +289,35 @@ def main():
         except OSError:
             pass
 
-    # 排序
-    w.sort_key, w.sort_desc = "size", True
-    w.refresh()
-    app.processEvents()
-    check("按大小排序不崩", w.list_table.rowCount() == 2)
+    # 排序规则（纯逻辑，不依赖真实目录）
+    from main_window import _sort_entries
+    _dirs = [("文件夹2", "/a/2"), ("文件夹10", "/a/10")]
+    _files = [("f2.txt", "/a/f2", 1024, 3.0),
+              ("f10.txt", "/a/f10", 2097152, 1.0),
+              ("f1.txt", "/a/f1", 512000, 2.0)]
+    _d, _f = _sort_entries(_dirs, _files, "name", False)
+    check("自然排序：文件夹2 在 文件夹10 前", _d[0][0] == "文件夹2", [x[0] for x in _d])
+    check("自然排序：f1 < f2 < f10", [x[0] for x in _f] == ["f1.txt", "f2.txt", "f10.txt"],
+          [x[0] for x in _f])
+    _d, _f = _sort_entries(_dirs, _files, "size", False)
+    check("大小按字节数比较（不是字符串）",
+          [x[0] for x in _f] == ["f2.txt", "f1.txt", "f10.txt"], [x[0] for x in _f])
+    _d, _f = _sort_entries(_dirs, _files, "size", True)
+    check("降序反转", [x[0] for x in _f] == ["f10.txt", "f1.txt", "f2.txt"], [x[0] for x in _f])
+    _d, _f = _sort_entries(_dirs, _files, "mtime", True)
+    check("时间降序", [x[0] for x in _f] == ["f2.txt", "f1.txt", "f10.txt"])
+
+    # 表头交互
+    w.set_sort("name", False)
+    w._on_header_clicked(1)
+    check("点表头切到大小列且升序", w.sort_key == "size" and not w.sort_desc,
+          (w.sort_key, w.sort_desc))
+    w._on_header_clicked(1)
+    check("再点同一列切降序", w.sort_key == "size" and w.sort_desc, w.sort_desc)
+    _labels = [w.list_table.horizontalHeaderItem(i).text() for i in range(4)]
+    check("表头带排序箭头", any("▼" in x for x in _labels), _labels)
+    w.set_sort("name", False)
+    check("行仍能正常渲染", w.list_table.rowCount() == 2, w.list_table.rowCount())
 
     # 搜索
     w.search.setText("说明")
